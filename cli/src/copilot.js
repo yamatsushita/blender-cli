@@ -262,23 +262,39 @@ async function getCopilotResponse(userPrompt, history = [], opts = {}) {
   }
   messages.push({ role: 'user', content: userContent });
 
-  const payload = JSON.stringify({ model, messages, max_tokens: 4096, temperature: 0.2 });
-  const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
+  // Fetch with automatic continuation if the response is truncated (finish_reason='length').
+  let fullRaw = '';
+  const MAX_CONTINUATIONS = 3;
 
-  const { statusCode, body } = await httpsRequest(
-    { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
-    payload,
-  );
+  for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
+    const payload = JSON.stringify({ model, messages, max_tokens: 8192, temperature: 0.2 });
+    const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
-  if (statusCode !== 200) {
-    let detail = body;
-    try { detail = JSON.parse(body).error?.message ?? body; } catch (_) {}
-    throw new Error(`Copilot API error ${statusCode}: ${detail}`);
+    const { statusCode, body } = await httpsRequest(
+      { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
+      payload,
+    );
+
+    if (statusCode !== 200) {
+      let detail = body;
+      try { detail = JSON.parse(body).error?.message ?? body; } catch (_) {}
+      throw new Error(`Copilot API error ${statusCode}: ${detail}`);
+    }
+
+    const data = JSON.parse(body);
+    const choice = data.choices?.[0] ?? {};
+    const chunk = choice.message?.content ?? '';
+    fullRaw += chunk;
+
+    // If not truncated, we're done.
+    if (choice.finish_reason !== 'length') break;
+
+    // Truncated — ask the model to continue from where it left off.
+    messages.push({ role: 'assistant', content: chunk });
+    messages.push({ role: 'user', content: 'Continue exactly where you left off. Output only the remaining Python code, no preamble.' });
   }
 
-  const data = JSON.parse(body);
-  const raw = data.choices?.[0]?.message?.content ?? '';
-  return parseResponse(raw);
+  return parseResponse(fullRaw);
 }
 
 /**
