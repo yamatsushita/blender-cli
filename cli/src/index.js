@@ -21,7 +21,8 @@ const {
   findBlenderExecutable,
   launchBlender,
   waitForBlender,
-  BRIDGE_DIR,
+  sessionPaths,
+  BRIDGE_BASE,
 } = require('./blender');
 
 function parseArgs(argv) {
@@ -96,34 +97,38 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { printHelp(); process.exit(0); }
 
-  console.log(`\n${fmt(c.bold + c.cyan, '🎨 Blender Copilot CLI')}`);
+  console.log(`\n${fmt(c.bold + c.cyan, '🎨 Blender CLI')}`);
   console.log(fmt(c.dim, 'Type a natural language prompt, /help for commands, or Ctrl+C to quit.\n'));
 
   // ── Blender auto-launch ────────────────────────────────────────────────
+  // sessionPaths is set when Blender is launched by this CLI invocation.
+  // It is null in dry-run or --no-launch mode.
+  let blenderPaths = null;
+
   if (!args.dryRun) {
-    if (isBlenderRunning()) {
-      console.log(fmt(c.green, '✔ Blender bridge is already active\n'));
-    } else if (!args.noLaunch) {
+    if (!args.noLaunch) {
       const blenderPath = findBlenderExecutable();
       if (!blenderPath) {
         console.log(fmt(c.yellow, '⚠ Blender not found automatically.'));
-        console.log(fmt(c.dim,   '  Set the BLENDER_PATH environment variable to the blender executable, then re-run.'));
-        console.log(fmt(c.dim,   '  Example: $env:BLENDER_PATH = "C:\\Program Files\\Blender Foundation\\Blender 4.3\\blender.exe"\n'));
+        console.log(fmt(c.dim,   '  Set BLENDER_PATH to the blender executable, then re-run.'));
+        console.log(fmt(c.dim,   '  Example: $env:BLENDER_PATH = "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe"\n'));
       } else {
         const blenderName = path.basename(path.dirname(blenderPath));
         console.log(fmt(c.dim, `  Found: ${blenderPath}`));
-        launchBlender(blenderPath);
+        const launched = launchBlender(blenderPath);
+        blenderPaths = launched.paths;
+        console.log(fmt(c.dim, `  Session: ${launched.sessionId}`));
         const spin = spinner(`Launching ${blenderName}…`);
-        const ready = await waitForBlender(45000);
+        const ready = await waitForBlender(blenderPaths.heartbeatFile, 45000);
         spin.stop(ready
-          ? fmt(c.green, `✔ Blender is ready`)
+          ? fmt(c.green, '✔ Blender is ready')
           : fmt(c.yellow, '⚠ Blender is taking longer than expected — proceeding anyway')
         );
         console.log('');
       }
     } else {
-      console.log(fmt(c.dim, `  Bridge dir: ${BRIDGE_DIR}`));
-      console.log(fmt(c.dim, '  Waiting for Blender with the "Copilot CLI Bridge" addon enabled.\n'));
+      console.log(fmt(c.dim, `  --no-launch: send commands to any Blender with the addon enabled.`));
+      console.log(fmt(c.dim, `  Session directory: ${BRIDGE_BASE}\n`));
     }
 
     // Pre-warm model discovery so the first prompt is fast
@@ -188,9 +193,15 @@ async function main() {
       rl.resume(); rl.prompt(); return;
     }
 
+    if (!blenderPaths) {
+      console.log(fmt(c.yellow, '  ⚠ No paired Blender session — use --no-launch only when\n' +
+        '    Blender with the addon is already open and you want to target it manually.\n'));
+      rl.resume(); rl.prompt(); return;
+    }
+
     const spin2 = spinner('Updating Blender scene…');
     try {
-      const result = await executeInBlender(code);
+      const result = await executeInBlender(code, blenderPaths);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated'));
         history.push({ prompt: line, code });

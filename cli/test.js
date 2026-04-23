@@ -20,11 +20,8 @@ const fs = require('fs');
 const {
   findBlenderExecutable,
   isBlenderRunning,
-  BRIDGE_DIR,
-  TRIGGER_FILE,
-  CODE_FILE,
-  RESULT_FILE,
-  HEARTBEAT_FILE,
+  sessionPaths,
+  BRIDGE_BASE,
 } = require('./src/blender');
 
 const { discoverModel, getCopilotCode, resetModelCache } = require('./src/copilot');
@@ -49,9 +46,9 @@ async function main() {
   // ── Environment ──────────────────────────────────────────────────────────
   console.log('\x1b[1mEnvironment\x1b[0m');
 
-  await test('Bridge directory is created on require', () => {
-    assert(fs.existsSync(BRIDGE_DIR), `Not found: ${BRIDGE_DIR}`);
-    assert(fs.statSync(BRIDGE_DIR).isDirectory());
+  await test('Bridge base directory is created on require', () => {
+    assert(fs.existsSync(BRIDGE_BASE), `Not found: ${BRIDGE_BASE}`);
+    assert(fs.statSync(BRIDGE_BASE).isDirectory());
   });
 
   await test('Blender executable detection', () => {
@@ -68,56 +65,70 @@ async function main() {
   // ── File bridge ──────────────────────────────────────────────────────────
   console.log('\n\x1b[1mFile bridge\x1b[0m');
 
+  // Use a fixed test session ID so we can clean up predictably
+  const TEST_SESSION = 'test-session-' + process.pid;
+  const p = sessionPaths(TEST_SESSION);
+  fs.mkdirSync(p.dir, { recursive: true });
+
+  await test('sessionPaths creates correct file paths', () => {
+    assert(p.dir.endsWith(TEST_SESSION), 'dir should end with session ID');
+    assert(p.heartbeatFile.includes(TEST_SESSION), 'heartbeatFile should be session-scoped');
+    assert(p.triggerFile.includes(TEST_SESSION), 'triggerFile should be session-scoped');
+    assert(p.resultFile.includes(TEST_SESSION), 'resultFile should be session-scoped');
+    // Two different sessions must have different paths
+    const p2 = sessionPaths('other-session');
+    assert(p.dir !== p2.dir, 'Two sessions should have different directories');
+  });
+
   await test('Heartbeat detection (fresh)', () => {
-    fs.writeFileSync(HEARTBEAT_FILE, String(Date.now() / 1000), 'utf8');
-    assert(isBlenderRunning(), 'Fresh heartbeat should be detected as running');
-    fs.unlinkSync(HEARTBEAT_FILE);
+    fs.writeFileSync(p.heartbeatFile, String(Date.now() / 1000), 'utf8');
+    assert(isBlenderRunning(p.heartbeatFile), 'Fresh heartbeat should be detected as running');
+    fs.unlinkSync(p.heartbeatFile);
   });
 
   await test('Heartbeat detection (stale)', () => {
-    fs.writeFileSync(HEARTBEAT_FILE, String(Date.now() / 1000 - 10), 'utf8');
-    assert(!isBlenderRunning(), 'Stale heartbeat should not be detected as running');
-    fs.unlinkSync(HEARTBEAT_FILE);
+    fs.writeFileSync(p.heartbeatFile, String(Date.now() / 1000 - 10), 'utf8');
+    assert(!isBlenderRunning(p.heartbeatFile), 'Stale heartbeat should not be detected as running');
+    fs.unlinkSync(p.heartbeatFile);
   });
 
   await test('Write code and trigger files', () => {
     const rid = 'test-write-' + Date.now();
     const code = 'import bpy\nprint("hello from test")';
 
-    try { fs.unlinkSync(TRIGGER_FILE); } catch (_) {}
-    try { fs.unlinkSync(CODE_FILE); } catch (_) {}
+    try { fs.unlinkSync(p.triggerFile); } catch (_) {}
+    try { fs.unlinkSync(p.codeFile); } catch (_) {}
 
-    fs.writeFileSync(CODE_FILE, code, 'utf8');
-    fs.writeFileSync(TRIGGER_FILE, rid, 'utf8');
+    fs.writeFileSync(p.codeFile, code, 'utf8');
+    fs.writeFileSync(p.triggerFile, rid, 'utf8');
 
-    assert.strictEqual(fs.readFileSync(CODE_FILE, 'utf8'), code);
-    assert.strictEqual(fs.readFileSync(TRIGGER_FILE, 'utf8'), rid);
+    assert.strictEqual(fs.readFileSync(p.codeFile, 'utf8'), code);
+    assert.strictEqual(fs.readFileSync(p.triggerFile, 'utf8'), rid);
 
-    // Clean up
-    try { fs.unlinkSync(TRIGGER_FILE); } catch (_) {}
-    try { fs.unlinkSync(CODE_FILE); } catch (_) {}
+    try { fs.unlinkSync(p.triggerFile); } catch (_) {}
+    try { fs.unlinkSync(p.codeFile); } catch (_) {}
   });
 
   await test('Full file bridge round-trip (simulated Blender)', async () => {
     const rid = 'test-roundtrip-' + Date.now();
     const code = 'import bpy\nprint("roundtrip")';
 
-    try { fs.unlinkSync(RESULT_FILE); } catch (_) {}
-    fs.writeFileSync(CODE_FILE, code, 'utf8');
-    fs.writeFileSync(TRIGGER_FILE, rid, 'utf8');
+    try { fs.unlinkSync(p.resultFile); } catch (_) {}
+    fs.writeFileSync(p.codeFile, code, 'utf8');
+    fs.writeFileSync(p.triggerFile, rid, 'utf8');
 
-    // Simulate Blender responding after 300 ms
+    // Simulate Blender responding after 300 ms in the session directory
     setTimeout(() => {
-      fs.writeFileSync(RESULT_FILE, JSON.stringify({ id: rid, success: true }), 'utf8');
+      fs.writeFileSync(p.resultFile, JSON.stringify({ id: rid, success: true }), 'utf8');
     }, 300);
 
     await new Promise((resolve, reject) => {
       const deadline = Date.now() + 5000;
       const iv = setInterval(() => {
-        if (fs.existsSync(RESULT_FILE)) {
+        if (fs.existsSync(p.resultFile)) {
           clearInterval(iv);
           try {
-            const r = JSON.parse(fs.readFileSync(RESULT_FILE, 'utf8'));
+            const r = JSON.parse(fs.readFileSync(p.resultFile, 'utf8'));
             assert.strictEqual(r.id, rid, 'Result ID mismatch');
             assert.strictEqual(r.success, true, 'Expected success:true');
             resolve();
@@ -129,6 +140,31 @@ async function main() {
       }, 100);
     });
   });
+
+  await test('Session isolation: two sessions do not share files', async () => {
+    const pA = sessionPaths('isolation-test-A');
+    const pB = sessionPaths('isolation-test-B');
+    fs.mkdirSync(pA.dir, { recursive: true });
+    fs.mkdirSync(pB.dir, { recursive: true });
+
+    fs.writeFileSync(pA.codeFile, 'code for A', 'utf8');
+    fs.writeFileSync(pB.codeFile, 'code for B', 'utf8');
+
+    assert.strictEqual(fs.readFileSync(pA.codeFile, 'utf8'), 'code for A');
+    assert.strictEqual(fs.readFileSync(pB.codeFile, 'utf8'), 'code for B');
+
+    // Simulate B's Blender writing a result — A should not see it
+    const ridB = 'rid-B';
+    fs.writeFileSync(pB.resultFile, JSON.stringify({ id: ridB, success: true }), 'utf8');
+    assert(!fs.existsSync(pA.resultFile), 'A should not see B\'s result file');
+
+    // Clean up
+    fs.rmSync(pA.dir, { recursive: true, force: true });
+    fs.rmSync(pB.dir, { recursive: true, force: true });
+  });
+
+  // Clean up test session dir
+  fs.rmSync(p.dir, { recursive: true, force: true });
 
   // ── Copilot API ──────────────────────────────────────────────────────────
   console.log('\n\x1b[1mCopilot API\x1b[0m');

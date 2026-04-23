@@ -3,12 +3,17 @@
 /**
  * Blender file-based bridge + auto-launch.
  *
- * Shared directory: ~/.blender-copilot/
- *   startup.py   – written by CLI; loaded by Blender on launch via --python
- *   run.py       – Python code to execute
- *   run.trigger  – writing this signals Blender to execute run.py
- *   result.json  – Blender writes execution result here
- *   heartbeat    – Blender writes current Unix timestamp every 0.25 s
+ * Each blender-cli session gets its own isolated subdirectory:
+ *   ~/.blender-copilot/<sessionId>/
+ *     startup.py   – written by CLI; loaded by Blender via --python
+ *     run.py       – Python code to execute
+ *     run.trigger  – writing this signals Blender to execute run.py
+ *     result.json  – Blender writes execution result here
+ *     heartbeat    – Blender writes Unix timestamp every 0.25 s
+ *
+ * This ensures that if multiple Blender instances are open (launched by
+ * separate blender-cli invocations or manually), each CLI only drives
+ * its own paired Blender.
  */
 
 const fs = require('fs');
@@ -17,28 +22,41 @@ const os = require('os');
 const crypto = require('crypto');
 const { execSync, spawn } = require('child_process');
 
-const BRIDGE_DIR      = path.join(os.homedir(), '.blender-copilot');
-const STARTUP_FILE    = path.join(BRIDGE_DIR, 'startup.py');
-const TRIGGER_FILE    = path.join(BRIDGE_DIR, 'run.trigger');
-const CODE_FILE       = path.join(BRIDGE_DIR, 'run.py');
-const RESULT_FILE     = path.join(BRIDGE_DIR, 'result.json');
-const HEARTBEAT_FILE  = path.join(BRIDGE_DIR, 'heartbeat');
-
-fs.mkdirSync(BRIDGE_DIR, { recursive: true });
+const BRIDGE_BASE = path.join(os.homedir(), '.blender-copilot');
+fs.mkdirSync(BRIDGE_BASE, { recursive: true });
 
 /**
- * Minimal Blender startup script — written to disk, passed via --python.
- * No addon installation required; registers the polling timer directly.
+ * Create an object with all paths scoped to a specific session directory.
+ * @param {string} sessionId
  */
-const STARTUP_SCRIPT = `\
-import bpy, json, textwrap, time
+function sessionPaths(sessionId) {
+  const dir = path.join(BRIDGE_BASE, sessionId);
+  return {
+    dir,
+    startupFile:   path.join(dir, 'startup.py'),
+    triggerFile:   path.join(dir, 'run.trigger'),
+    codeFile:      path.join(dir, 'run.py'),
+    resultFile:    path.join(dir, 'result.json'),
+    heartbeatFile: path.join(dir, 'heartbeat'),
+  };
+}
+
+/**
+ * Build the startup Python script for a specific session directory.
+ * The session path is embedded so this Blender only watches that directory.
+ * @param {string} sessionDir  Absolute path to the session directory
+ * @returns {string}
+ */
+function buildStartupScript(sessionDir) {
+  const pyPath = sessionDir.replace(/\\/g, '/');
+  return `import bpy, json, textwrap, time
 from pathlib import Path
 
-BRIDGE_DIR     = Path.home() / ".blender-copilot"
-TRIGGER_FILE   = BRIDGE_DIR / "run.trigger"
-CODE_FILE      = BRIDGE_DIR / "run.py"
-RESULT_FILE    = BRIDGE_DIR / "result.json"
-HEARTBEAT_FILE = BRIDGE_DIR / "heartbeat"
+SESSION_DIR    = Path(r"${pyPath}")
+TRIGGER_FILE   = SESSION_DIR / "run.trigger"
+CODE_FILE      = SESSION_DIR / "run.py"
+RESULT_FILE    = SESSION_DIR / "result.json"
+HEARTBEAT_FILE = SESSION_DIR / "heartbeat"
 
 def _copilot_poll():
     HEARTBEAT_FILE.write_text(str(time.time()), encoding="utf-8")
@@ -64,19 +82,19 @@ def _copilot_poll():
 
 if not bpy.app.timers.is_registered(_copilot_poll):
     bpy.app.timers.register(_copilot_poll, persistent=True)
-    print("[Copilot Bridge] Active, watching", BRIDGE_DIR)
+    print(f"[Copilot Bridge] Session {SESSION_DIR.name!r} active")
 `;
+}
 
 /**
  * Find the Blender executable on the current platform.
- * Priority: BLENDER_PATH env → system PATH → common install locations.
+ * Priority: BLENDER_PATH env -> system PATH -> common install locations.
  * @returns {string|null}
  */
 function findBlenderExecutable() {
   if (process.env.BLENDER_PATH && fs.existsSync(process.env.BLENDER_PATH))
     return process.env.BLENDER_PATH;
 
-  // System PATH
   try {
     const cmd = process.platform === 'win32' ? 'where.exe blender' : 'which blender';
     const line = execSync(cmd, { encoding: 'utf8', stdio: 'pipe' })
@@ -95,7 +113,7 @@ function findBlenderExecutable() {
       if (!fs.existsSync(base)) continue;
       const dirs = fs.readdirSync(base)
         .filter(d => /blender/i.test(d))
-        .sort().reverse(); // highest version first
+        .sort().reverse();
       for (const d of dirs) {
         const exe = path.join(base, d, 'blender.exe');
         if (fs.existsSync(exe)) return exe;
@@ -119,12 +137,14 @@ function findBlenderExecutable() {
 }
 
 /**
- * Returns true if Blender wrote a heartbeat within the last 3 seconds.
+ * Returns true if the Blender instance for the given session wrote a
+ * heartbeat within the last 3 seconds.
+ * @param {string} heartbeatFile
  * @returns {boolean}
  */
-function isBlenderRunning() {
+function isBlenderRunning(heartbeatFile) {
   try {
-    const ts = parseFloat(fs.readFileSync(HEARTBEAT_FILE, 'utf8').trim());
+    const ts = parseFloat(fs.readFileSync(heartbeatFile, 'utf8').trim());
     return !isNaN(ts) && (Date.now() / 1000 - ts) < 3.0;
   } catch (_) {
     return false;
@@ -132,63 +152,70 @@ function isBlenderRunning() {
 }
 
 /**
- * Write the startup script and spawn Blender with --python pointing to it.
- * The process is detached so it outlives this CLI session.
+ * Create a new session directory, write the startup script, and spawn
+ * Blender pointing to it. Returns the session ID and paths.
  * @param {string} blenderPath
+ * @returns {{ sessionId: string, paths: ReturnType<typeof sessionPaths> }}
  */
 function launchBlender(blenderPath) {
-  fs.writeFileSync(STARTUP_FILE, STARTUP_SCRIPT, 'utf8');
-  const child = spawn(blenderPath, ['--python', STARTUP_FILE], {
+  const sessionId = crypto.randomUUID();
+  const p = sessionPaths(sessionId);
+  fs.mkdirSync(p.dir, { recursive: true });
+  fs.writeFileSync(p.startupFile, buildStartupScript(p.dir), 'utf8');
+
+  const child = spawn(blenderPath, ['--python', p.startupFile], {
     detached: true,
     stdio: 'ignore',
   });
   child.unref();
-  return child;
+  return { sessionId, paths: p };
 }
 
 /**
- * Poll until Blender's heartbeat appears or timeout expires.
+ * Poll until the session-specific heartbeat appears or timeout expires.
+ * @param {string} heartbeatFile
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-function waitForBlender(timeoutMs = 45000) {
+function waitForBlender(heartbeatFile, timeoutMs = 45000) {
   return new Promise((resolve) => {
     const start = Date.now();
     const iv = setInterval(() => {
-      if (isBlenderRunning()) { clearInterval(iv); resolve(true); }
+      if (isBlenderRunning(heartbeatFile)) { clearInterval(iv); resolve(true); }
       else if (Date.now() - start >= timeoutMs) { clearInterval(iv); resolve(false); }
     }, 300);
   });
 }
 
 /**
- * Write code to Blender via the shared file bridge and wait for the result.
+ * Write code to a specific Blender session's bridge and wait for the result.
  * @param {string} code
+ * @param {ReturnType<typeof sessionPaths>} paths
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-async function executeInBlender(code) {
+async function executeInBlender(code, paths) {
   const requestId = crypto.randomUUID();
-  try { fs.unlinkSync(RESULT_FILE); } catch (_) {}
+  try { fs.unlinkSync(paths.resultFile); } catch (_) {}
 
-  fs.writeFileSync(CODE_FILE, code, 'utf8');
-  fs.writeFileSync(TRIGGER_FILE, requestId, 'utf8');
+  fs.writeFileSync(paths.codeFile, code, 'utf8');
+  fs.writeFileSync(paths.triggerFile, requestId, 'utf8');
 
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + 30_000;
     const iv = setInterval(() => {
-      if (!fs.existsSync(RESULT_FILE)) {
+      if (!fs.existsSync(paths.resultFile)) {
         if (Date.now() > deadline) {
           clearInterval(iv);
           reject(new Error(
             'Timeout: Blender did not respond within 30 s.\n' +
-            'Is Blender running with the Copilot Bridge active?'
+            'Is the paired Blender still running?'
           ));
         }
         return;
       }
       clearInterval(iv);
       try {
-        const result = JSON.parse(fs.readFileSync(RESULT_FILE, 'utf8'));
+        const result = JSON.parse(fs.readFileSync(paths.resultFile, 'utf8'));
         resolve(result.id === requestId
           ? result
           : { success: false, error: 'Stale result — please try again' });
@@ -205,9 +232,6 @@ module.exports = {
   findBlenderExecutable,
   launchBlender,
   waitForBlender,
-  BRIDGE_DIR,
-  TRIGGER_FILE,
-  CODE_FILE,
-  RESULT_FILE,
-  HEARTBEAT_FILE,
+  sessionPaths,
+  BRIDGE_BASE,
 };
