@@ -3,32 +3,37 @@
 /**
  * GitHub Copilot API client.
  *
- * Authentication: we call `gh auth token` to obtain the current user's token,
- * then use it against the Copilot chat completions endpoint.
- *
- * The system prompt is carefully crafted so the model always returns
- * *only* Python code that can be exec()'d inside Blender (no markdown fences,
- * no prose).
+ * - Auth via `gh auth token`
+ * - Auto-discovers available models with GET /models so we never hardcode
+ *   a model name that may not be supported on the user's Copilot plan.
  */
 
 const { execSync } = require('child_process');
 const https = require('https');
 
 const COPILOT_ENDPOINT = 'api.githubcopilot.com';
-const COPILOT_PATH = '/chat/completions';
+
+/** Preferred models in priority order — use actual IDs from GET /models. */
+const MODEL_PRIORITY = [
+  'gpt-4.1',
+  'gpt-5.4',
+  'claude-sonnet-4.6',
+  'claude-sonnet-4.5',
+  'claude-sonnet-4',
+  'gpt-4o-mini',
+  'claude-haiku-4.5',
+  'gpt-3.5-turbo',
+];
 
 const SYSTEM_PROMPT = `\
 You are an expert Blender 3D Python API developer.
-Your job is to generate Python code using the bpy module that fulfills the user's natural language request.
+Generate Python code using the bpy module that fulfills the user's request.
 
-STRICT RULES:
-1. Output ONLY valid, executable Python code. No markdown code fences, no explanations, no comments unless clarifying.
-2. Always import bpy at the top if not already imported (it is always available as a global in Blender).
-3. Use bpy.ops, bpy.data, bpy.context as needed.
-4. When creating objects, deselect all first, then select the new object.
-5. When modifying materials, check if they exist before creating new ones.
-6. Keep code concise — prefer bpy.ops for common tasks.
-7. If the request is ambiguous, make a reasonable creative choice.
+RULES:
+1. Output ONLY valid executable Python code. No markdown fences, no prose.
+2. The global "bpy" is always available — do not re-import unless needed.
+3. Use bpy.ops, bpy.data, bpy.context as appropriate.
+4. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
 
 Example – "add a red cube at the origin":
 import bpy
@@ -39,27 +44,28 @@ mat.diffuse_color = (1, 0, 0, 1)
 obj.data.materials.append(mat)
 `;
 
-/**
- * Retrieve GitHub token via the `gh` CLI.
- * @returns {string}
- */
+/** @type {string|null} Cached model ID for the session. */
+let _cachedModel = null;
+
 function getGitHubToken() {
   try {
     return execSync('gh auth token', { encoding: 'utf8' }).trim();
   } catch (err) {
-    throw new Error(
-      'Could not get GitHub token. Make sure you are logged in with `gh auth login`.\n' +
-      err.message
-    );
+    throw new Error('Could not get GitHub token. Run `gh auth login` first.\n' + err.message);
   }
 }
 
-/**
- * Make an HTTPS request and return the response body as a string.
- * @param {object} options - Node https.request options
- * @param {string|null} body - request body
- * @returns {Promise<{statusCode: number, body: string}>}
- */
+function copilotHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+    'Copilot-Integration-Id': 'vscode-chat',
+    'Editor-Version': 'vscode/1.90.0',
+    'Editor-Plugin-Version': 'copilot-chat/0.15.0',
+    'User-Agent': 'blender-copilot-cli/2.0',
+  };
+}
+
 function httpsRequest(options, body = null) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
@@ -76,67 +82,51 @@ function httpsRequest(options, body = null) {
 }
 
 /**
- * Call the GitHub Copilot chat completions API and return the generated Python code.
- * @param {string} userPrompt
- * @param {string[]} history - previous (prompt, code) pairs for context
- * @returns {Promise<string>} Python code
+ * Query GET /models and return the best available chat model ID.
+ * Falls back to the first item in MODEL_PRIORITY if the request fails.
+ * @returns {Promise<string>}
  */
-async function getCopilotCode(userPrompt, history = []) {
+async function discoverModel() {
+  if (_cachedModel) return _cachedModel;
+
   const token = getGitHubToken();
+  try {
+    const { statusCode, body } = await httpsRequest({
+      hostname: COPILOT_ENDPOINT,
+      path: '/models',
+      method: 'GET',
+      headers: copilotHeaders(token),
+    });
 
-  const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+    if (statusCode === 200) {
+      const data = JSON.parse(body);
+      // Only consider chat-capable models
+      const available = (data.data || [])
+        .filter((m) => m.capabilities?.type === 'chat')
+        .map((m) => m.id);
 
-  // Inject prior turns so the model understands scene state
-  for (const { prompt, code } of history) {
-    messages.push({ role: 'user', content: prompt });
-    messages.push({ role: 'assistant', content: code });
-  }
+      for (const preferred of MODEL_PRIORITY) {
+        // Exact match first; then prefix match (e.g. "gpt-4.1-2025-04-14" for "gpt-4.1")
+        const found =
+          available.find((a) => a === preferred) ||
+          available.find((a) => a.startsWith(preferred + '-'));
+        if (found) {
+          _cachedModel = found;
+          return _cachedModel;
+        }
+      }
+      // No preferred model found — take the first chat model
+      if (available.length > 0) {
+        _cachedModel = available[0];
+        return _cachedModel;
+      }
+    }
+  } catch (_) { /* fall through to hardcoded default */ }
 
-  messages.push({ role: 'user', content: userPrompt });
-
-  const payload = JSON.stringify({
-    model: 'gpt-4o',
-    messages,
-    max_tokens: 1024,
-    temperature: 0.2,
-  });
-
-  const options = {
-    hostname: COPILOT_ENDPOINT,
-    path: COPILOT_PATH,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload),
-      Authorization: `Bearer ${token}`,
-      'Copilot-Integration-Id': 'vscode-chat',
-      'Editor-Version': 'vscode/1.90.0',
-      'Editor-Plugin-Version': 'copilot-chat/0.15.0',
-    },
-  };
-
-  const { statusCode, body } = await httpsRequest(options, payload);
-
-  if (statusCode !== 200) {
-    let detail = body;
-    try {
-      detail = JSON.parse(body).error?.message ?? body;
-    } catch (_) { /* ignore */ }
-    throw new Error(`Copilot API error ${statusCode}: ${detail}`);
-  }
-
-  const data = JSON.parse(body);
-  const raw = data.choices?.[0]?.message?.content ?? '';
-
-  // Strip markdown code fences if the model added them despite our instructions
-  return stripCodeFences(raw.trim());
+  _cachedModel = MODEL_PRIORITY[0];
+  return _cachedModel;
 }
 
-/**
- * Remove ```python ... ``` or ``` ... ``` wrappers.
- * @param {string} text
- * @returns {string}
- */
 function stripCodeFences(text) {
   return text
     .replace(/^```(?:python)?\s*\n?/i, '')
@@ -144,4 +134,43 @@ function stripCodeFences(text) {
     .trim();
 }
 
-module.exports = { getCopilotCode };
+/**
+ * Generate Blender Python code from a natural language prompt.
+ * @param {string} userPrompt
+ * @param {Array<{prompt: string, code: string}>} history
+ * @returns {Promise<string>} Python code
+ */
+async function getCopilotCode(userPrompt, history = []) {
+  const token = getGitHubToken();
+  const model = await discoverModel();
+
+  const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+  for (const { prompt, code } of history) {
+    messages.push({ role: 'user', content: prompt });
+    messages.push({ role: 'assistant', content: code });
+  }
+  messages.push({ role: 'user', content: userPrompt });
+
+  const payload = JSON.stringify({ model, messages, max_tokens: 1024, temperature: 0.2 });
+  const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
+
+  const { statusCode, body } = await httpsRequest(
+    { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
+    payload
+  );
+
+  if (statusCode !== 200) {
+    let detail = body;
+    try { detail = JSON.parse(body).error?.message ?? body; } catch (_) {}
+    throw new Error(`Copilot API error ${statusCode}: ${detail}`);
+  }
+
+  const data = JSON.parse(body);
+  const raw = data.choices?.[0]?.message?.content ?? '';
+  return stripCodeFences(raw.trim());
+}
+
+/** Reset cached model (useful for testing). */
+function resetModelCache() { _cachedModel = null; }
+
+module.exports = { getCopilotCode, discoverModel, resetModelCache };

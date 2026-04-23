@@ -27,6 +27,7 @@ import bpy
 import json
 import os
 import textwrap
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ BRIDGE_DIR = Path.home() / ".blender-copilot"
 TRIGGER_FILE = BRIDGE_DIR / "run.trigger"
 CODE_FILE = BRIDGE_DIR / "run.py"
 RESULT_FILE = BRIDGE_DIR / "result.json"
+HEARTBEAT_FILE = BRIDGE_DIR / "heartbeat"
 
 BRIDGE_DIR.mkdir(exist_ok=True)
 
