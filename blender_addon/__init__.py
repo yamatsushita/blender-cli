@@ -59,6 +59,16 @@ def _find_view3d():
     return None, None, None
 
 
+def _get_all_view3d_areas():
+    """Return list of all VIEW_3D areas across all windows."""
+    return [
+        area
+        for window in bpy.context.window_manager.windows
+        for area in window.screen.areas
+        if area.type == 'VIEW_3D'
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Timer callback – runs on Blender's main thread
 # ---------------------------------------------------------------------------
@@ -83,9 +93,17 @@ def _poll_and_execute():
     result: dict
     try:
         window, area, region = _find_view3d()
-        ns = {"bpy": bpy}
+        view3d_areas = _get_all_view3d_areas()
+        ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
+
         if window and area and region:
-            with bpy.context.temp_override(window=window, area=area, region=region):
+            with bpy.context.temp_override(
+                window=window,
+                screen=window.screen,
+                area=area,
+                region=region,
+                space_data=area.spaces.active,
+            ):
                 exec(textwrap.dedent(code), ns)  # noqa: S102
         else:
             exec(textwrap.dedent(code), ns)  # noqa: S102

@@ -80,6 +80,16 @@ def _find_view3d_context():
     return {}
 
 
+def _get_all_view3d_areas():
+    """Return list of all VIEW_3D areas across all windows."""
+    areas = []
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                areas.append(area)
+    return areas
+
+
 def _copilot_poll():
     HEARTBEAT_FILE.write_text(str(time.time()), encoding="utf-8")
     if not TRIGGER_FILE.exists():
@@ -92,7 +102,12 @@ def _copilot_poll():
         return 0.25
     try:
         ctx = _find_view3d_context()
-        ns = {"bpy": bpy}
+        # Expose a pre-built list of all VIEW_3D areas in the exec namespace.
+        # The generated code can use bpy.context.screen.areas normally inside
+        # temp_override, but we also pass _view3d_areas as a convenience for
+        # direct-property-access patterns.
+        view3d_areas = _get_all_view3d_areas()
+        ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
         if ctx:
             with bpy.context.temp_override(**ctx):
                 exec(textwrap.dedent(code), ns)

@@ -35,20 +35,40 @@ Generate Python code using the bpy module that fulfills the user's request.
 RULES:
 1. Output ONLY valid executable Python code. No markdown fences, no prose.
 2. The global "bpy" is always available — do not re-import unless needed.
-3. Use bpy.ops, bpy.data, bpy.context as appropriate.
-4. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
-5. Your code runs inside a bpy.context.temp_override() that targets the active
-   VIEW_3D area, so viewport operators (view3d.view_camera, view3d.view_axis,
-   view3d.zoom, etc.) work without any additional context setup in your code.
-   Never add your own context override for VIEW_3D operators — it is already done.
-6. For non-viewport operators that need a specific context (e.g. node editor),
-   you may still use bpy.context.temp_override() as needed.
+3. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
+4. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D
+   area, so most viewport operators work. However, prefer DIRECT PROPERTY ACCESS over
+   operators for viewport and perspective changes — it is more reliable:
 
-Example – "switch to camera view":
-bpy.ops.view3d.view_camera()
+   VIEWPORT PERSPECTIVE (preferred over bpy.ops):
+   - Switch to camera view:
+       for area in bpy.context.screen.areas:
+           if area.type == 'VIEW_3D':
+               area.spaces[0].region_3d.view_perspective = 'CAMERA'
+   - Switch to perspective view:
+       for area in bpy.context.screen.areas:
+           if area.type == 'VIEW_3D':
+               area.spaces[0].region_3d.view_perspective = 'PERSP'
+   - Switch to orthographic view:
+       for area in bpy.context.screen.areas:
+           if area.type == 'VIEW_3D':
+               area.spaces[0].region_3d.view_perspective = 'ORTHO'
 
-Example – "add a red cube at the origin":
-import bpy
+   VIEWPORT SHADING (preferred over bpy.ops):
+   - Set shading mode (SOLID, WIREFRAME, MATERIAL, RENDERED):
+       for area in bpy.context.screen.areas:
+           if area.type == 'VIEW_3D':
+               area.spaces[0].shading.type = 'RENDERED'
+
+5. For all other operations (adding objects, editing geometry, materials, rendering, etc.)
+   use bpy.ops, bpy.data, bpy.context as normal.
+
+Example - "switch to camera view":
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        area.spaces[0].region_3d.view_perspective = 'CAMERA'
+
+Example - "add a red cube at the origin":
 bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
 obj = bpy.context.active_object
 mat = bpy.data.materials.new(name="Red")
@@ -74,7 +94,7 @@ function copilotHeaders(token) {
     'Copilot-Integration-Id': 'vscode-chat',
     'Editor-Version': 'vscode/1.90.0',
     'Editor-Plugin-Version': 'copilot-chat/0.15.0',
-    'User-Agent': 'blender-copilot-cli/2.0',
+    'User-Agent': 'blender-cli/2.0',
   };
 }
 
@@ -112,13 +132,11 @@ async function discoverModel() {
 
     if (statusCode === 200) {
       const data = JSON.parse(body);
-      // Only consider chat-capable models
       const available = (data.data || [])
         .filter((m) => m.capabilities?.type === 'chat')
         .map((m) => m.id);
 
       for (const preferred of MODEL_PRIORITY) {
-        // Exact match first; then prefix match (e.g. "gpt-4.1-2025-04-14" for "gpt-4.1")
         const found =
           available.find((a) => a === preferred) ||
           available.find((a) => a.startsWith(preferred + '-'));
@@ -127,7 +145,6 @@ async function discoverModel() {
           return _cachedModel;
         }
       }
-      // No preferred model found — take the first chat model
       if (available.length > 0) {
         _cachedModel = available[0];
         return _cachedModel;
