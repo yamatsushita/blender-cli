@@ -1,6 +1,7 @@
 # 🎨 Blender Copilot CLI
 
-Edit your Blender 3D scene with natural language, powered by **GitHub Copilot**.
+Edit your Blender 3D scene with natural language, powered by **GitHub Copilot**.  
+No server to start, no ports to configure — communication happens through a shared directory.
 
 ```
 ▶ add a glossy red sphere above the default cube
@@ -28,39 +29,39 @@ Edit your Blender 3D scene with natural language, powered by **GitHub Copilot**.
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Your terminal                                                       │
-│                                                                      │
-│  $ blender-copilot                                                   │
-│  ▶  "add a blue torus at (2, 0, 1)"                                  │
-│           │                                                          │
-│           ▼                                                          │
-│   ┌───────────────────┐    GitHub Copilot API                        │
-│   │  copilot.js       │ ─────────────────────►  gpt-4o               │
-│   │  (auth via gh CLI)│ ◄─────────────────────  Python bpy code      │
-│   └───────────────────┘                                              │
-│           │  HTTP POST /execute {"code": "..."}                      │
-│           ▼                                                          │
-│   ┌───────────────────┐   localhost:5123                             │
-│   │  blender.js       │ ──────────────────────►  Blender addon       │
-│   └───────────────────┘                          (HTTP server)       │
-└─────────────────────────────────────────────────────────────────────┘
-                                                         │
-                                              exec() on main thread
-                                                         │
-                                                         ▼
-                                                 ┌──────────────┐
-                                                 │  Blender 3D  │
-                                                 │  Scene live  │
-                                                 │  updates ✨  │
-                                                 └──────────────┘
+Your terminal
+─────────────
+$ blender-copilot
+▶  "add a blue torus at (2, 0, 1)"
+        │
+        ▼  gh auth token + Copilot Chat API
+   copilot.js ──────────────────────────► gpt-4o
+                ◄──────────────────────── Python bpy code
+        │
+        ▼  write files
+   ~/.blender-copilot/
+     run.py       ← generated Python code
+     run.trigger  ← signals Blender to execute
+
+                          Blender (addon timer, every 0.25 s)
+                          ────────────────────────────────────
+                          sees run.trigger
+                              │
+                              ▼  exec() on main thread
+                          bpy scene updates live ✨
+                              │
+                              ▼  write
+                          result.json  ← success / error
+
+   CLI reads result.json, shows outcome
 ```
 
 1. You type a **natural language prompt** in the terminal.
-2. The CLI authenticates with your local `gh` session and calls the **GitHub Copilot Chat API**.
+2. The CLI authenticates via `gh auth token` and calls the **GitHub Copilot Chat API**.
 3. Copilot returns Python code using the `bpy` (Blender Python) API.
-4. The CLI sends the code over HTTP to the **Blender Copilot Bridge addon** running inside Blender.
-5. The addon executes the code on Blender's **main thread** (via a modal timer operator) and redraws all viewports.
+4. The CLI writes the code to `~/.blender-copilot/run.py` and creates `run.trigger`.
+5. The Blender addon's background timer picks up the trigger, **executes the code on the main thread**, and writes `result.json`.
+6. The CLI reads the result and shows success or error.
 
 ---
 
@@ -80,26 +81,24 @@ Edit your Blender 3D scene with natural language, powered by **GitHub Copilot**.
 ### 1 — Install the Blender addon
 
 1. Open Blender.
-2. Go to **Edit → Preferences → Add-ons → Install…**
-3. Select the `blender_addon/` **folder** (zip it first if Blender asks for a zip):
-
+2. Zip the `blender_addon/` folder:
    ```bash
    # From the repo root
-   cd blender_addon
-   zip -r ../blender_copilot_bridge.zip .
+   Compress-Archive blender_addon blender_copilot_bridge.zip   # PowerShell
+   # or:  zip -r blender_copilot_bridge.zip blender_addon/     # macOS/Linux
    ```
+3. **Edit → Preferences → Add-ons → Install…** and select the zip.
+4. Search for **"Copilot CLI Bridge"** and enable it with the checkbox.
 
-4. Search for **"Copilot CLI Bridge"** in the add-ons list and **enable it**.
-5. Open a **3D Viewport**, press **N** to open the sidebar, and click the **Copilot** tab.
-6. Press **Start Server** — the bridge listens on `127.0.0.1:5123` by default.
+That's it — no server to start. The addon begins watching `~/.blender-copilot/` immediately.  
+A status panel is available at **View3D → Sidebar (N) → Copilot** for reference.
 
 ### 2 — Install the CLI
 
 ```bash
-# From the repo root
 cd cli
 npm install
-npm link        # makes `blender-copilot` available globally
+npm link          # makes `blender-copilot` available globally
 ```
 
 Or run without installing:
@@ -111,8 +110,7 @@ node cli/src/index.js
 ### 3 — Authenticate with GitHub Copilot
 
 ```bash
-gh auth login   # if not already logged in
-gh auth token   # verify a token is available
+gh auth login     # if not already logged in
 ```
 
 ---
@@ -120,11 +118,9 @@ gh auth token   # verify a token is available
 ## Usage
 
 ```
-blender-copilot [options]
+blender-copilot [--dry-run] [--help]
 
 OPTIONS
-  --port <n>   Port the Blender addon server is listening on  (default: 5123)
-  --host <h>   Hostname of the Blender instance               (default: 127.0.0.1)
   --dry-run    Generate code but do NOT send to Blender
   --help       Show help
 ```
@@ -143,9 +139,8 @@ OPTIONS
 ```
 $ blender-copilot
 🎨 Blender Copilot CLI
-Type a natural language prompt, /help for commands, or Ctrl+C to quit.
-
-✔ Connected to Blender bridge at 127.0.0.1:5123
+  Bridge directory: /Users/you/.blender-copilot
+  Make sure the "Copilot CLI Bridge" addon is enabled in Blender.
 
 ▶  delete the default cube
 ✔ Code generated
@@ -173,7 +168,7 @@ Goodbye! 👋
 blender-copilot --dry-run
 ```
 
-Generates and prints the code without sending it to Blender — useful for reviewing or learning Blender Python.
+Generates and prints the code without touching Blender — useful for reviewing or learning Blender Python.
 
 ---
 
@@ -182,26 +177,28 @@ Generates and prints the code without sending it to Blender — useful for revie
 ```
 blender-cli/
 ├── blender_addon/
-│   └── __init__.py         # Blender addon: HTTP server + modal executor + UI panel
+│   └── __init__.py          # Blender addon: bpy.app.timers watcher + UI panel
 └── cli/
     ├── package.json
     ├── bin/
-    │   └── blender-copilot.js   # Executable entry point
+    │   └── blender-copilot.js    # Executable entry point
     └── src/
-        ├── index.js        # Interactive REPL, spinner, arg parsing
-        ├── copilot.js      # GitHub Copilot API client (auth via `gh auth token`)
-        └── blender.js      # HTTP client for the Blender addon bridge
+        ├── index.js         # Interactive REPL, spinner, session history
+        ├── copilot.js       # GitHub Copilot Chat API client
+        └── blender.js       # File-based bridge (~/.blender-copilot/)
 ```
 
 ### Blender addon internals
 
-The addon registers a **modal operator** (`COPILOT_OT_RunServer`) that fires every 50 ms via a `wm.event_timer_add` timer. When the HTTP server thread receives a `/execute` request, it pushes `(code, threading.Event)` onto a `queue.Queue`. The modal operator drains the queue on the main thread, calls `exec()`, signals the event, and tags all areas for redraw. The HTTP handler blocks on `event.wait(timeout=30)` so the response includes success/error information.
+`bpy.app.timers.register(_poll_and_execute, persistent=True)` registers a callback that fires every **0.25 s** on Blender's main thread.  
+When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws all viewports, and writes `result.json`.  
+The CLI polls `result.json` every 150 ms (matching the request ID) for up to 30 s.
 
 ---
 
 ## Security notes
 
-- The HTTP server binds to **`127.0.0.1` only** — it is not reachable from the network.
+- All file I/O stays in `~/.blender-copilot/` on your local machine — no network port is opened.
 - `exec()` runs with full Python access inside the Blender process. Only run code you trust.
 - Your GitHub token is read from `gh auth token` and sent to `api.githubcopilot.com` over HTTPS; it is never stored on disk by this tool.
 
@@ -211,11 +208,10 @@ The addon registers a **modal operator** (`COPILOT_OT_RunServer`) that fires eve
 
 | Symptom | Fix |
 |---------|-----|
-| `Cannot reach Blender bridge` | Click **Start Server** in Blender's Copilot sidebar panel |
+| Timeout after 30 s | Enable the **Copilot CLI Bridge** addon in Blender (Edit → Preferences → Add-ons) |
 | `Could not get GitHub token` | Run `gh auth login` |
-| `Copilot API error 401` | Your token may have expired — re-authenticate with `gh auth login` |
-| Port conflict | Change the port in Blender's panel and pass `--port <n>` to the CLI |
-| Code runs but scene doesn't update | Make sure you're in Object Mode; some `bpy.ops` require specific context |
+| `Copilot API error 401` | Token expired — re-authenticate with `gh auth login` |
+| Code runs but scene doesn't update visually | Make sure you're in Object Mode; some `bpy.ops` require specific context |
 
 ---
 

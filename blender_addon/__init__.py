@@ -1,197 +1,79 @@
 """
 Blender Copilot Bridge Addon
-Exposes a local HTTP server so the copilot-blender CLI can push Python code
-into Blender and have it executed on the main thread in real-time.
+
+Uses a shared directory (~/.blender-copilot/) for communication — no server,
+no ports, no configuration required.
+
+Protocol (all files live in BRIDGE_DIR):
+  CLI writes  → run.py      (Python code to execute)
+  CLI creates → run.trigger (content = unique request ID)
+  Blender polls every 0.25 s; when trigger found:
+    - deletes trigger
+    - exec() the code on the main thread
+    - writes result.json  {"id": <request_id>, "success": bool, "error"?: str}
 """
 
 bl_info = {
     "name": "Copilot CLI Bridge",
     "author": "yamatsushita",
-    "version": (1, 0, 0),
+    "version": (2, 0, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Copilot",
-    "description": "Bridge between GitHub Copilot CLI and Blender 3D scene",
+    "description": "Edit the Blender scene via GitHub Copilot CLI (file-based bridge)",
     "category": "Development",
 }
 
 import bpy
-import threading
 import json
-import queue
+import os
 import textwrap
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Shared state
+# Shared directory
 # ---------------------------------------------------------------------------
 
-_server: HTTPServer | None = None
-_server_thread: threading.Thread | None = None
-code_queue: queue.Queue = queue.Queue()
-result_store: dict = {"last": None}   # written from main thread, read by handler
+BRIDGE_DIR = Path.home() / ".blender-copilot"
+TRIGGER_FILE = BRIDGE_DIR / "run.trigger"
+CODE_FILE = BRIDGE_DIR / "run.py"
+RESULT_FILE = BRIDGE_DIR / "result.json"
 
-
-# ---------------------------------------------------------------------------
-# HTTP handler
-# ---------------------------------------------------------------------------
-
-class _CopilotHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler; all real work is deferred to the main thread."""
-
-    def log_message(self, fmt, *args):  # silence default access log
-        pass
-
-    def _send_json(self, status: int, body: dict):
-        payload = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-    def do_GET(self):
-        if self.path == "/status":
-            self._send_json(200, {"status": "ok", "addon": "copilot-bridge"})
-        else:
-            self._send_json(404, {"error": "not found"})
-
-    def do_POST(self):
-        if self.path != "/execute":
-            self._send_json(404, {"error": "not found"})
-            return
-
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length)
-            body = json.loads(raw)
-        except Exception as e:
-            self._send_json(400, {"error": f"bad request: {e}"})
-            return
-
-        code = body.get("code", "").strip()
-        if not code:
-            self._send_json(400, {"error": "field 'code' is required"})
-            return
-
-        # Enqueue and wait for the main thread to process it (timeout 30 s)
-        evt = threading.Event()
-        code_queue.put((code, evt))
-        executed = evt.wait(timeout=30)
-
-        if not executed:
-            self._send_json(503, {"error": "timeout waiting for Blender main thread"})
-            return
-
-        result = result_store.get("last", {})
-        status = 200 if result.get("success") else 500
-        self._send_json(status, result)
-
+BRIDGE_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Modal operator – processes the queue inside Blender's main thread
+# Timer callback – runs on Blender's main thread
 # ---------------------------------------------------------------------------
 
-class COPILOT_OT_RunServer(bpy.types.Operator):
-    """Start / stop the Copilot HTTP bridge server"""
-    bl_idname = "copilot.run_server"
-    bl_label = "Run Copilot Server"
-
-    _timer = None
-
-    def modal(self, context, event):
-        if not context.scene.copilot_server_running:
-            self.cancel(context)
-            return {"CANCELLED"}
-
-        if event.type != "TIMER":
-            return {"PASS_THROUGH"}
-
-        while not code_queue.empty():
-            code, evt = code_queue.get()
-            try:
-                # Dedent in case the user sent indented snippets
-                exec(textwrap.dedent(code), {"bpy": bpy})  # noqa: S102
-                result_store["last"] = {"success": True, "message": "executed"}
-                # Refresh all viewports
-                for window in context.window_manager.windows:
-                    for area in window.screen.areas:
-                        area.tag_redraw()
-            except Exception as exc:
-                result_store["last"] = {"success": False, "error": str(exc)}
-                print(f"[Copilot Bridge] Error executing code: {exc}")
-            finally:
-                evt.set()
-
-        return {"PASS_THROUGH"}
-
-    def execute(self, context):
-        wm = context.window_manager
-        self._timer = wm.event_timer_add(0.05, window=context.window)
-        wm.modal_handler_add(self)
-        return {"RUNNING_MODAL"}
-
-    def cancel(self, context):
-        if self._timer:
-            context.window_manager.event_timer_remove(self._timer)
-        self._timer = None
+_timer_handle = None
 
 
-# ---------------------------------------------------------------------------
-# Start / Stop operators
-# ---------------------------------------------------------------------------
+def _poll_and_execute():
+    """Called by Blender's app timer every 0.25 s."""
+    if not TRIGGER_FILE.exists():
+        return 0.25  # reschedule
 
-class COPILOT_OT_StartServer(bpy.types.Operator):
-    """Start the Copilot Bridge HTTP server"""
-    bl_idname = "copilot.start_server"
-    bl_label = "Start Server"
+    # Read request ID and code before deleting the trigger
+    try:
+        request_id = TRIGGER_FILE.read_text(encoding="utf-8").strip()
+        code = CODE_FILE.read_text(encoding="utf-8") if CODE_FILE.exists() else ""
+        TRIGGER_FILE.unlink(missing_ok=True)
+    except OSError:
+        return 0.25
 
-    def execute(self, context):
-        global _server, _server_thread
-        if context.scene.copilot_server_running:
-            self.report({"WARNING"}, "Server is already running")
-            return {"CANCELLED"}
+    result: dict
+    try:
+        exec(textwrap.dedent(code), {"bpy": bpy})  # noqa: S102
+        result = {"id": request_id, "success": True}
+        # Redraw all open viewports
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
+    except Exception as exc:
+        result = {"id": request_id, "success": False, "error": str(exc)}
+        print(f"[Copilot Bridge] Error: {exc}")
 
-        port = context.scene.copilot_server_port
-        try:
-            _server = HTTPServer(("127.0.0.1", port), _CopilotHandler)
-            _server_thread = threading.Thread(target=_server.serve_forever, daemon=True)
-            _server_thread.start()
-        except OSError as e:
-            self.report({"ERROR"}, f"Could not start server: {e}")
-            return {"CANCELLED"}
-
-        context.scene.copilot_server_running = True
-        bpy.ops.copilot.run_server("INVOKE_DEFAULT")
-        self.report({"INFO"}, f"Copilot Bridge listening on 127.0.0.1:{port}")
-        return {"FINISHED"}
-
-
-class COPILOT_OT_StopServer(bpy.types.Operator):
-    """Stop the Copilot Bridge HTTP server"""
-    bl_idname = "copilot.stop_server"
-    bl_label = "Stop Server"
-
-    def execute(self, context):
-        global _server, _server_thread
-        if not context.scene.copilot_server_running:
-            self.report({"WARNING"}, "Server is not running")
-            return {"CANCELLED"}
-
-        context.scene.copilot_server_running = False  # signals modal to stop
-        if _server:
-            _server.shutdown()
-            _server = None
-        _server_thread = None
-        self.report({"INFO"}, "Copilot Bridge stopped")
-        return {"FINISHED"}
+    RESULT_FILE.write_text(json.dumps(result), encoding="utf-8")
+    return 0.25  # reschedule
 
 
 # ---------------------------------------------------------------------------
@@ -207,59 +89,36 @@ class COPILOT_PT_Panel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
-
-        running = scene.copilot_server_running
-        status = "🟢 Running" if running else "🔴 Stopped"
-
         box = layout.box()
-        box.label(text=f"Status: {status}")
-        box.prop(scene, "copilot_server_port", text="Port")
-
-        row = layout.row(align=True)
-        if running:
-            row.operator("copilot.stop_server", text="Stop Server", icon="PAUSE")
-        else:
-            row.operator("copilot.start_server", text="Start Server", icon="PLAY")
-
+        box.label(text="Status: 🟢 Watching for prompts", icon="CHECKMARK")
+        box.label(text=str(BRIDGE_DIR), icon="FILE_FOLDER")
         layout.separator()
-        layout.label(text="Connect with CLI:", icon="CONSOLE")
-        layout.label(text=f"  npx blender-copilot --port {scene.copilot_server_port}")
+        layout.label(text="Run in terminal:", icon="CONSOLE")
+        layout.label(text="  blender-copilot")
 
 
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
-classes = (
-    COPILOT_OT_RunServer,
-    COPILOT_OT_StartServer,
-    COPILOT_OT_StopServer,
-    COPILOT_PT_Panel,
-)
+classes = (COPILOT_PT_Panel,)
 
 
 def register():
+    global _timer_handle
     for cls in classes:
         bpy.utils.register_class(cls)
-
-    bpy.types.Scene.copilot_server_running = bpy.props.BoolProperty(
-        name="Server Running", default=False
-    )
-    bpy.types.Scene.copilot_server_port = bpy.props.IntProperty(
-        name="Port", default=5123, min=1024, max=65535
-    )
+    _timer_handle = bpy.app.timers.register(_poll_and_execute, persistent=True)
+    print(f"[Copilot Bridge] Watching {BRIDGE_DIR}")
 
 
 def unregister():
-    if bpy.context.scene.get("copilot_server_running"):
-        bpy.ops.copilot.stop_server()
-
+    global _timer_handle
+    if _timer_handle is not None and bpy.app.timers.is_registered(_poll_and_execute):
+        bpy.app.timers.unregister(_poll_and_execute)
+    _timer_handle = None
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-
-    del bpy.types.Scene.copilot_server_running
-    del bpy.types.Scene.copilot_server_port
 
 
 if __name__ == "__main__":

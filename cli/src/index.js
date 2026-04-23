@@ -4,48 +4,42 @@
  * blender-copilot – interactive CLI entry point.
  *
  * Usage:
- *   blender-copilot [--port 5123] [--host 127.0.0.1] [--dry-run]
+ *   blender-copilot [--dry-run] [--help]
  *
  * Flags:
- *   --port   Port where the Blender Copilot Bridge addon is listening (default: 5123)
- *   --host   Host of the Blender instance (default: 127.0.0.1)
  *   --dry-run  Print generated code but do NOT send it to Blender
- *   --help   Show help
+ *   --help     Show help
  */
 
 const readline = require('readline');
 const { getCopilotCode } = require('./copilot');
-const { checkBlenderStatus, executeInBlender } = require('./blender');
+const { executeInBlender, BRIDGE_DIR } = require('./blender');
 
 // ---------------------------------------------------------------------------
-// Simple arg parsing (no extra deps)
+// Simple arg parsing
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { port: 5123, host: '127.0.0.1', dryRun: false, help: false };
-  for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
-      case '--port':    args.port = parseInt(argv[++i], 10); break;
-      case '--host':    args.host = argv[++i]; break;
-      case '--dry-run': args.dryRun = true; break;
-      case '--help':    args.help = true; break;
-    }
+  const args = { dryRun: false, help: false };
+  for (const a of argv) {
+    if (a === '--dry-run') args.dryRun = true;
+    if (a === '--help')    args.help = true;
   }
   return args;
 }
 
 // ---------------------------------------------------------------------------
-// ANSI colours (no chalk dependency required)
+// ANSI colours
 // ---------------------------------------------------------------------------
 const c = {
-  reset:  '\x1b[0m',
-  bold:   '\x1b[1m',
-  dim:    '\x1b[2m',
-  cyan:   '\x1b[36m',
-  green:  '\x1b[32m',
-  yellow: '\x1b[33m',
-  red:    '\x1b[31m',
-  blue:   '\x1b[34m',
-  magenta:'\x1b[35m',
+  reset:   '\x1b[0m',
+  bold:    '\x1b[1m',
+  dim:     '\x1b[2m',
+  cyan:    '\x1b[36m',
+  green:   '\x1b[32m',
+  yellow:  '\x1b[33m',
+  red:     '\x1b[31m',
+  blue:    '\x1b[34m',
+  magenta: '\x1b[35m',
 };
 const fmt = (color, text) => `${color}${text}${c.reset}`;
 
@@ -69,26 +63,24 @@ function printHelp() {
 ${fmt(c.bold + c.cyan, 'blender-copilot')} — edit your Blender scene with natural language
 
 ${fmt(c.bold, 'USAGE')}
-  blender-copilot [options]
+  blender-copilot [--dry-run] [--help]
 
 ${fmt(c.bold, 'OPTIONS')}
-  --port <n>   Port the Blender addon server is listening on  (default: 5123)
-  --host <h>   Hostname of the Blender instance               (default: 127.0.0.1)
   --dry-run    Generate code but do NOT send to Blender
   --help       Show this help
 
 ${fmt(c.bold, 'REPL COMMANDS')}
   /undo        Run bpy.ops.ed.undo() in Blender
-  /clear       Clear all mesh objects in the scene
+  /clear       Delete all mesh objects in the scene
   /history     Show the current session's prompt history
   /quit        Exit
 
 ${fmt(c.bold, 'EXAMPLE PROMPTS')}
   add a blue torus at position (2, 0, 1)
-  rotate the selected object 45 degrees on the Z axis
-  set the background color to a dark navy blue
-  add three point lighting setup for product rendering
-  apply a glossy red material to every object in the scene
+  rotate the active object 45 degrees on the Z axis
+  set the world background to a dark navy blue
+  add a three-point lighting setup for product rendering
+  apply a glossy red material to every mesh in the scene
 `);
 }
 
@@ -96,8 +88,8 @@ ${fmt(c.bold, 'EXAMPLE PROMPTS')}
 // Built-in REPL commands
 // ---------------------------------------------------------------------------
 const BUILTIN_COMMANDS = {
-  '/undo':    'import bpy\nbpy.ops.ed.undo()',
-  '/clear':   `import bpy
+  '/undo':  'import bpy\nbpy.ops.ed.undo()',
+  '/clear': `import bpy
 bpy.ops.object.select_all(action='DESELECT')
 bpy.ops.object.select_by_type(type='MESH')
 bpy.ops.object.delete()`,
@@ -114,19 +106,11 @@ async function main() {
   console.log(`\n${fmt(c.bold + c.cyan, '🎨 Blender Copilot CLI')}`);
   console.log(fmt(c.dim, 'Type a natural language prompt, /help for commands, or Ctrl+C to quit.\n'));
 
-  // Check Blender bridge connectivity
-  if (!args.dryRun) {
-    const spin = spinner(`Connecting to Blender bridge on ${args.host}:${args.port}…`);
-    const ok = await checkBlenderStatus(args.host, args.port);
-    if (ok) {
-      spin.stop(fmt(c.green, `✔ Connected to Blender bridge at ${args.host}:${args.port}`));
-    } else {
-      spin.stop(fmt(c.yellow, `⚠ Blender bridge not found at ${args.host}:${args.port}`));
-      console.log(fmt(c.dim,   '  Start the addon server inside Blender: View3D → Sidebar → Copilot → Start Server'));
-      console.log(fmt(c.dim,   '  Continuing in offline mode (use --dry-run to suppress this warning)\n'));
-    }
+  if (args.dryRun) {
+    console.log(fmt(c.yellow, '  [dry-run] Code will be printed but not sent to Blender.\n'));
   } else {
-    console.log(fmt(c.yellow, '  [dry-run mode] Code will be printed but not sent to Blender.\n'));
+    console.log(fmt(c.dim, `  Bridge directory: ${BRIDGE_DIR}`));
+    console.log(fmt(c.dim, '  Make sure the "Copilot CLI Bridge" addon is enabled in Blender.\n'));
   }
 
   /** @type {Array<{prompt: string, code: string}>} */
@@ -135,7 +119,7 @@ async function main() {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: fmt(c.bold + c.blue, '▶ ') + fmt(c.bold, ''),
+    prompt: fmt(c.bold + c.blue, '▶ '),
   });
 
   rl.prompt();
@@ -164,9 +148,8 @@ async function main() {
 
     if (BUILTIN_COMMANDS[line]) {
       code = BUILTIN_COMMANDS[line];
-      console.log(fmt(c.dim, `  [built-in command]`));
+      console.log(fmt(c.dim, '  [built-in command]'));
     } else {
-      // Call Copilot to generate code
       const spin = spinner('Asking GitHub Copilot…');
       try {
         code = await getCopilotCode(line, history);
@@ -177,7 +160,7 @@ async function main() {
       }
     }
 
-    // Always show the generated code
+    // Show the generated code
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);
     const border = fmt(c.dim, '─'.repeat(60));
     console.log(border);
@@ -190,10 +173,9 @@ async function main() {
       rl.resume(); rl.prompt(); return;
     }
 
-    // Send to Blender
     const spin2 = spinner('Sending to Blender…');
     try {
-      const result = await executeInBlender(code, args.host, args.port);
+      const result = await executeInBlender(code);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated in Blender'));
         history.push({ prompt: line, code });
