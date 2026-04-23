@@ -1,0 +1,22 @@
+{
+  "name": "blender-copilot",
+  "version": "1.0.0",
+  "description": "Interactive CLI that uses GitHub Copilot to edit Blender 3D scenes via natural language",
+  "bin": {
+    "blender-copilot": "./bin/blender-copilot.js"
+  },
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["blender", "copilot", "3d", "ai", "cli"],
+  "author": "yamatsushita",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "readline": "^1.3.0"
+  }
+}
