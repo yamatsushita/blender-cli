@@ -98,7 +98,7 @@ function copilotHeaders(token) {
   };
 }
 
-function httpsRequest(options, body = null) {
+function httpsRequest(options, body = null, timeoutMs = 60_000) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
       const chunks = [];
@@ -108,6 +108,9 @@ function httpsRequest(options, body = null) {
       );
     });
     req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs / 1000}s`));
+    });
     if (body) req.write(body);
     req.end();
   });
@@ -180,7 +183,7 @@ async function getCopilotCode(userPrompt, history = []) {
   }
   messages.push({ role: 'user', content: userPrompt });
 
-  const payload = JSON.stringify({ model, messages, max_tokens: 1024, temperature: 0.2 });
+  const payload = JSON.stringify({ model, messages, max_tokens: 4096, temperature: 0.2 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   const { statusCode, body } = await httpsRequest(
