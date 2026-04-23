@@ -60,8 +60,32 @@ RULES:
            if area.type == 'VIEW_3D':
                area.spaces[0].shading.type = 'RENDERED'
 
-5. For all other operations (adding objects, editing geometry, materials, rendering, etc.)
+5. UNDO / REDO — these operators require a window-level context, NOT a VIEW_3D
+   context. Always use this exact pattern (it works from any execution context):
+       wm = bpy.context.window_manager
+       win = wm.windows[0]
+       with bpy.context.temp_override(window=win):
+           bpy.ops.ed.undo()          # or bpy.ops.ed.redo()
+   To undo N steps, call the block N times (one call per undo step):
+       for _ in range(N):
+           with bpy.context.temp_override(window=win):
+               bpy.ops.ed.undo()
+
+6. For all other operations (adding objects, editing geometry, materials, rendering, etc.)
    use bpy.ops, bpy.data, bpy.context as normal.
+
+Example - "undo the last action":
+wm = bpy.context.window_manager
+win = wm.windows[0]
+with bpy.context.temp_override(window=win):
+    bpy.ops.ed.undo()
+
+Example - "undo 3 times":
+wm = bpy.context.window_manager
+win = wm.windows[0]
+for _ in range(3):
+    with bpy.context.temp_override(window=win):
+        bpy.ops.ed.undo()
 
 Example - "switch to camera view":
 for area in bpy.context.screen.areas:

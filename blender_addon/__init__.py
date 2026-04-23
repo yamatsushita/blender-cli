@@ -69,6 +69,20 @@ def _get_all_view3d_areas():
     ]
 
 
+def _is_window_op_only(code: str) -> bool:
+    """Return True when code consists solely of ed.undo / ed.redo calls.
+
+    These operators require a plain window context; running them inside a
+    VIEW_3D temp_override breaks their poll() check.
+    """
+    import re
+    stripped = re.sub(r'#[^\n]*', '', code)
+    lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+    return bool(lines) and all(
+        re.fullmatch(r'bpy\.ops\.ed\.(undo|redo)\(\)', l) for l in lines
+    )
+
+
 # ---------------------------------------------------------------------------
 # Timer callback – runs on Blender's main thread
 # ---------------------------------------------------------------------------
@@ -92,21 +106,27 @@ def _poll_and_execute():
 
     result: dict
     try:
-        window, area, region = _find_view3d()
         view3d_areas = _get_all_view3d_areas()
         ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
 
-        if window and area and region:
-            with bpy.context.temp_override(
-                window=window,
-                screen=window.screen,
-                area=area,
-                region=region,
-                space_data=area.spaces.active,
-            ):
+        # undo/redo need a plain window context; VIEW_3D override breaks their poll.
+        if _is_window_op_only(code):
+            win = bpy.context.window_manager.windows[0]
+            with bpy.context.temp_override(window=win):
                 exec(textwrap.dedent(code), ns)  # noqa: S102
         else:
-            exec(textwrap.dedent(code), ns)  # noqa: S102
+            window, area, region = _find_view3d()
+            if window and area and region:
+                with bpy.context.temp_override(
+                    window=window,
+                    screen=window.screen,
+                    area=area,
+                    region=region,
+                    space_data=area.spaces.active,
+                ):
+                    exec(textwrap.dedent(code), ns)  # noqa: S102
+            else:
+                exec(textwrap.dedent(code), ns)  # noqa: S102
 
         result = {"id": request_id, "success": True}
         for win in bpy.context.window_manager.windows:

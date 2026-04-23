@@ -90,6 +90,17 @@ def _get_all_view3d_areas():
     return areas
 
 
+def _is_window_op_only(code):
+    """Return True when code consists solely of ed.undo / ed.redo calls.
+    These operators need a window context, not a VIEW_3D area context."""
+    import re
+    stripped = re.sub(r'#[^\\n]*', '', code)   # remove comments
+    lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+    return lines and all(
+        re.fullmatch(r'bpy\\.ops\\.ed\\.(undo|redo)\\(\\)', l) for l in lines
+    )
+
+
 def _copilot_poll():
     HEARTBEAT_FILE.write_text(str(time.time()), encoding="utf-8")
     if not TRIGGER_FILE.exists():
@@ -101,18 +112,20 @@ def _copilot_poll():
     except OSError:
         return 0.25
     try:
-        ctx = _find_view3d_context()
-        # Expose a pre-built list of all VIEW_3D areas in the exec namespace.
-        # The generated code can use bpy.context.screen.areas normally inside
-        # temp_override, but we also pass _view3d_areas as a convenience for
-        # direct-property-access patterns.
         view3d_areas = _get_all_view3d_areas()
         ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
-        if ctx:
-            with bpy.context.temp_override(**ctx):
+        # undo/redo need a plain window context; VIEW_3D override breaks their poll.
+        if _is_window_op_only(code):
+            win = bpy.context.window_manager.windows[0]
+            with bpy.context.temp_override(window=win):
                 exec(textwrap.dedent(code), ns)
         else:
-            exec(textwrap.dedent(code), ns)
+            ctx = _find_view3d_context()
+            if ctx:
+                with bpy.context.temp_override(**ctx):
+                    exec(textwrap.dedent(code), ns)
+            else:
+                exec(textwrap.dedent(code), ns)
         res = {"id": rid, "success": True}
         for w in bpy.context.window_manager.windows:
             for a in w.screen.areas:
