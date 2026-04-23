@@ -14,7 +14,8 @@
 
 const readline = require('readline');
 const path = require('path');
-const { getCopilotCode, discoverModel } = require('./copilot');
+const { getCopilotResponse, planAssetDownload, discoverModel } = require('./copilot');
+const { resolveAsset } = require('./assets');
 const {
   executeInBlender,
   isBlenderRunning,
@@ -86,9 +87,8 @@ ${fmt(c.bold, 'EXAMPLE PROMPTS')}
 }
 
 const BUILTIN_COMMANDS = {
-  '/undo':  'import bpy\nbpy.ops.ed.undo()',
-  '/clear': `import bpy
-bpy.ops.object.select_all(action='DESELECT')
+  '/undo': `bpy.ops.ed.undo()`,
+  '/clear': `bpy.ops.object.select_all(action='DESELECT')
 bpy.ops.object.select_by_type(type='MESH')
 bpy.ops.object.delete()`,
 };
@@ -167,18 +167,44 @@ async function main() {
     if (line === '/quit' || line === '/exit') { rl.close(); return; }
 
     let code;
+    let thinking = null;
+
     if (BUILTIN_COMMANDS[line]) {
       code = BUILTIN_COMMANDS[line];
       console.log(fmt(c.dim, '  [built-in command]'));
     } else {
-      const spin = spinner('Asking GitHub Copilot…');
+      // ── Step 1: detect & download external asset ─────────────────────────
+      let assetOpts = {};
+      const spin = spinner('Thinking…');
       try {
-        code = await getCopilotCode(line, history);
+        const plan = await planAssetDownload(line);
+        if (plan.needsAsset && plan.query) {
+          spin.update(`Searching for model: "${plan.query}"…`);
+          const asset = await resolveAsset(plan.query, (msg) => spin.update(msg));
+          if (asset) {
+            assetOpts = { assetPath: asset.path, assetFormat: asset.format };
+            spin.update(`Model ready: ${asset.name}.${asset.format} (${asset.source})`);
+          }
+        }
+        // ── Step 2: generate code with reasoning ───────────────────────────
+        spin.update('Asking GitHub Copilot…');
+        const response = await getCopilotResponse(line, history, assetOpts);
+        thinking = response.thinking;
+        code = response.code;
         spin.stop(fmt(c.green, '✔ Code generated'));
       } catch (err) {
         spin.stop(fmt(c.red, `✖ Copilot error: ${err.message}`));
         rl.resume(); rl.prompt(); return;
       }
+    }
+
+    // ── Show reasoning ──────────────────────────────────────────────────────
+    if (thinking) {
+      console.log(`\n${fmt(c.bold, '💭 Reasoning:')}`);
+      const border = fmt(c.dim, '─'.repeat(60));
+      console.log(border);
+      thinking.split('\n').forEach((l) => console.log('  ' + fmt(c.dim, l)));
+      console.log(border);
     }
 
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);

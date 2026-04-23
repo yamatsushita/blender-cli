@@ -30,73 +30,63 @@ const MODEL_PRIORITY = [
 
 const SYSTEM_PROMPT = `\
 You are an expert Blender 3D Python API developer.
-Generate Python code using the bpy module that fulfills the user's request.
+Your job is to generate Python code (using the bpy module) that fulfills the user's request.
+
+RESPONSE FORMAT — you MUST follow this exactly, no exceptions:
+<thinking>
+Explain step-by-step: what the user wants, which Blender API calls to use, any special
+considerations (e.g. external assets, complex node setups, context requirements).
+</thinking>
+<Python code here — no fences, no other text, starts immediately after </thinking>>
 
 RULES:
-1. Output ONLY valid executable Python code. No markdown fences, no prose.
-2. The global "bpy" is always available — do not re-import unless needed.
-3. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
-4. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D
+1. The global "bpy" is always available — do not re-import unless needed.
+2. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
+3. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D
    area, so most viewport operators work. However, prefer DIRECT PROPERTY ACCESS over
-   operators for viewport and perspective changes — it is more reliable:
+   operators for viewport and perspective changes:
 
-   VIEWPORT PERSPECTIVE (preferred over bpy.ops):
-   - Switch to camera view:
-       for area in bpy.context.screen.areas:
-           if area.type == 'VIEW_3D':
-               area.spaces[0].region_3d.view_perspective = 'CAMERA'
-   - Switch to perspective view:
-       for area in bpy.context.screen.areas:
-           if area.type == 'VIEW_3D':
-               area.spaces[0].region_3d.view_perspective = 'PERSP'
-   - Switch to orthographic view:
-       for area in bpy.context.screen.areas:
-           if area.type == 'VIEW_3D':
-               area.spaces[0].region_3d.view_perspective = 'ORTHO'
+   - Camera view:       area.spaces[0].region_3d.view_perspective = 'CAMERA'
+   - Perspective view:  area.spaces[0].region_3d.view_perspective = 'PERSP'
+   - Orthographic view: area.spaces[0].region_3d.view_perspective = 'ORTHO'
+   - Shading mode:      area.spaces[0].shading.type = 'RENDERED'
+   (loop over bpy.context.screen.areas, check area.type == 'VIEW_3D')
 
-   VIEWPORT SHADING (preferred over bpy.ops):
-   - Set shading mode (SOLID, WIREFRAME, MATERIAL, RENDERED):
-       for area in bpy.context.screen.areas:
-           if area.type == 'VIEW_3D':
-               area.spaces[0].shading.type = 'RENDERED'
-
-5. UNDO / REDO — these operators require a window-level context, NOT a VIEW_3D
-   context. Always use this exact pattern (it works from any execution context):
-       wm = bpy.context.window_manager
-       win = wm.windows[0]
+4. UNDO / REDO — require a window-level context, NOT VIEW_3D. Use this exact pattern:
+       win = bpy.context.window_manager.windows[0]
        with bpy.context.temp_override(window=win):
-           bpy.ops.ed.undo()          # or bpy.ops.ed.redo()
-   To undo N steps, call the block N times (one call per undo step):
-       for _ in range(N):
-           with bpy.context.temp_override(window=win):
-               bpy.ops.ed.undo()
+           bpy.ops.ed.undo()    # or bpy.ops.ed.redo()
+   To undo N steps, loop N times (one bpy.ops.ed.undo() per iteration).
 
-6. For all other operations (adding objects, editing geometry, materials, rendering, etc.)
-   use bpy.ops, bpy.data, bpy.context as normal.
+5. IMPORTING EXTERNAL ASSETS — if the variable ASSET_PATH is defined in the namespace,
+   an external 3D model has been pre-downloaded. Import it with the appropriate operator:
+   - .obj file:      bpy.ops.wm.obj_import(filepath=ASSET_PATH)
+   - .gltf/.glb:    bpy.ops.import_scene.gltf(filepath=ASSET_PATH)
+   After import, the newly added object(s) are active/selected. Apply transforms/
+   materials as needed. Do NOT attempt to download files yourself.
 
-Example - "undo the last action":
-wm = bpy.context.window_manager
-win = wm.windows[0]
-with bpy.context.temp_override(window=win):
-    bpy.ops.ed.undo()
+6. For all other operations use bpy.ops, bpy.data, bpy.context as normal.
 
-Example - "undo 3 times":
-wm = bpy.context.window_manager
-win = wm.windows[0]
+Example — "undo 3 times":
+<thinking>
+The user wants to undo 3 times. undo/redo require a window context, not VIEW_3D.
+I'll loop 3 times, each time using temp_override(window=win).
+</thinking>
+win = bpy.context.window_manager.windows[0]
 for _ in range(3):
     with bpy.context.temp_override(window=win):
         bpy.ops.ed.undo()
 
-Example - "switch to camera view":
-for area in bpy.context.screen.areas:
-    if area.type == 'VIEW_3D':
-        area.spaces[0].region_3d.view_perspective = 'CAMERA'
-
-Example - "add a red cube at the origin":
+Example — "add a red cube at the origin":
+<thinking>
+The user wants a red cube. I'll use primitive_cube_add, then create a Principled BSDF
+material with red base color and attach it.
+</thinking>
 bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
 obj = bpy.context.active_object
 mat = bpy.data.materials.new(name="Red")
-mat.diffuse_color = (1, 0, 0, 1)
+mat.use_nodes = True
+mat.node_tree.nodes["Principled BSDF"].inputs['Base Color'].default_value = (1, 0, 0, 1)
 obj.data.materials.append(mat)
 `;
 
@@ -191,12 +181,69 @@ function stripCodeFences(text) {
 }
 
 /**
- * Generate Blender Python code from a natural language prompt.
+ * Parse a model response that may contain <thinking>...</thinking> before code.
+ * @param {string} raw
+ * @returns {{ thinking: string|null, code: string }}
+ */
+function parseResponse(raw) {
+  const match = raw.match(/<thinking>([\s\S]*?)<\/thinking>/i);
+  if (!match) return { thinking: null, code: stripCodeFences(raw.trim()) };
+  const thinking = match[1].trim();
+  const code = stripCodeFences(raw.slice(match.index + match[0].length).trim());
+  return { thinking, code };
+}
+
+/**
+ * Ask Copilot whether this prompt requires downloading an external 3D model.
+ * Returns { needsAsset: bool, query: string }.
+ * @param {string} userPrompt
+ * @returns {Promise<{needsAsset: boolean, query: string}>}
+ */
+async function planAssetDownload(userPrompt) {
+  const token = getGitHubToken();
+  const model = await discoverModel();
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You are a 3D asset detector. Analyze the Blender scene request and respond ONLY with valid JSON ' +
+        '(no markdown, no prose, no explanation).\n' +
+        'Format: {"needs_asset": <bool>, "query": "<search query for the 3D model file, or empty string>"}\n' +
+        'Set needs_asset=true ONLY if the request asks for a specific real-world or named 3D model that ' +
+        'is not built into Blender (e.g. "Stanford teapot", "Stanford bunny", "Utah teapot", a named scan, ' +
+        'a named famous test model). ' +
+        'Set needs_asset=false for anything Blender can create natively (cube, sphere, cylinder, torus, ' +
+        'cone, monkey/Suzanne, text, curve, light, camera, etc.).',
+    },
+    { role: 'user', content: userPrompt },
+  ];
+
+  const payload = JSON.stringify({ model, messages, max_tokens: 80, temperature: 0 });
+  const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
+
+  try {
+    const { statusCode, body } = await httpsRequest(
+      { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
+      payload,
+      20_000,
+    );
+    if (statusCode !== 200) return { needsAsset: false, query: '' };
+    const data = JSON.parse(body);
+    const raw = data.choices?.[0]?.message?.content ?? '{}';
+    const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
+    return { needsAsset: Boolean(parsed.needs_asset), query: parsed.query ?? '' };
+  } catch { return { needsAsset: false, query: '' }; }
+}
+
+/**
+ * Generate Blender Python code with reasoning from a natural language prompt.
  * @param {string} userPrompt
  * @param {Array<{prompt: string, code: string}>} history
- * @returns {Promise<string>} Python code
+ * @param {{assetPath?: string, assetFormat?: string}} [opts]
+ * @returns {Promise<{thinking: string|null, code: string}>}
  */
-async function getCopilotCode(userPrompt, history = []) {
+async function getCopilotResponse(userPrompt, history = [], opts = {}) {
   const token = getGitHubToken();
   const model = await discoverModel();
 
@@ -205,14 +252,22 @@ async function getCopilotCode(userPrompt, history = []) {
     messages.push({ role: 'user', content: prompt });
     messages.push({ role: 'assistant', content: code });
   }
-  messages.push({ role: 'user', content: userPrompt });
+
+  let userContent = userPrompt;
+  if (opts.assetPath) {
+    const fwdPath = opts.assetPath.replace(/\\/g, '/');
+    userContent =
+      `[ASSET PRE-DOWNLOADED: ASSET_PATH = '${fwdPath}', format: ${opts.assetFormat ?? 'obj'}]\n` +
+      userPrompt;
+  }
+  messages.push({ role: 'user', content: userContent });
 
   const payload = JSON.stringify({ model, messages, max_tokens: 4096, temperature: 0.2 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   const { statusCode, body } = await httpsRequest(
     { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
-    payload
+    payload,
   );
 
   if (statusCode !== 200) {
@@ -223,10 +278,21 @@ async function getCopilotCode(userPrompt, history = []) {
 
   const data = JSON.parse(body);
   const raw = data.choices?.[0]?.message?.content ?? '';
-  return stripCodeFences(raw.trim());
+  return parseResponse(raw);
+}
+
+/**
+ * Generate Blender Python code from a natural language prompt (returns code string only).
+ * @param {string} userPrompt
+ * @param {Array<{prompt: string, code: string}>} history
+ * @returns {Promise<string>} Python code
+ */
+async function getCopilotCode(userPrompt, history = []) {
+  const { code } = await getCopilotResponse(userPrompt, history);
+  return code;
 }
 
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponse, planAssetDownload, discoverModel, resetModelCache };
