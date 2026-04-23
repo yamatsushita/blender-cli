@@ -44,7 +44,7 @@ async function test(name, fn) {
 }
 
 async function main() {
-  console.log('\n\x1b[1m🧪 blender-copilot smoke tests\x1b[0m\n');
+  console.log('\n\x1b[1m🧪 blender-cli smoke tests\x1b[0m\n');
 
   // ── Environment ──────────────────────────────────────────────────────────
   console.log('\x1b[1mEnvironment\x1b[0m');

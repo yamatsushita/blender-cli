@@ -31,7 +31,7 @@ No server to start, no ports to configure — communication happens through a sh
 ```
 Your terminal
 ─────────────
-$ blender-copilot
+$ blender-cli
 ▶  "add a blue torus at (2, 0, 1)"
         │
         ▼  gh auth token + Copilot Chat API
@@ -39,7 +39,7 @@ $ blender-copilot
                 ◄──────────────────────── Python bpy code
         │
         ▼  write files
-   ~/.blender-copilot/
+   ~/.blender-cli/
      run.py       ← generated Python code
      run.trigger  ← signals Blender to execute
 
@@ -59,7 +59,7 @@ $ blender-copilot
 1. You type a **natural language prompt** in the terminal.
 2. The CLI authenticates via `gh auth token` and calls the **GitHub Copilot Chat API**.
 3. Copilot returns Python code using the `bpy` (Blender Python) API.
-4. The CLI writes the code to `~/.blender-copilot/run.py` and creates `run.trigger`.
+4. The CLI writes the code to `~/.blender-cli/run.py` and creates `run.trigger`.
 5. The Blender addon's background timer picks up the trigger, **executes the code on the main thread**, and writes `result.json`.
 6. The CLI reads the result and shows success or error.
 
@@ -90,7 +90,7 @@ $ blender-copilot
 3. **Edit → Preferences → Add-ons → Install…** and select the zip.
 4. Search for **"Copilot CLI Bridge"** and enable it with the checkbox.
 
-That's it — no server to start. The addon begins watching `~/.blender-copilot/` immediately.  
+That's it — no server to start. The addon begins watching `~/.blender-cli/` immediately.  
 A status panel is available at **View3D → Sidebar (N) → Copilot** for reference.
 
 ### 2 — Install the CLI
@@ -98,7 +98,7 @@ A status panel is available at **View3D → Sidebar (N) → Copilot** for refere
 ```bash
 cd cli
 npm install
-npm link          # makes `blender-copilot` available globally
+npm link          # makes `blender-cli` available globally
 ```
 
 Or run without installing:
@@ -118,7 +118,7 @@ gh auth login     # if not already logged in
 ## Usage
 
 ```
-blender-copilot [--dry-run] [--help]
+blender-cli [--dry-run] [--help]
 
 OPTIONS
   --dry-run    Generate code but do NOT send to Blender
@@ -137,9 +137,9 @@ OPTIONS
 ### Example session
 
 ```
-$ blender-copilot
+$ blender-cli
 🎨 Blender Copilot CLI
-  Bridge directory: /Users/you/.blender-copilot
+  Bridge directory: /Users/you/.blender-cli
   Make sure the "Copilot CLI Bridge" addon is enabled in Blender.
 
 ▶  delete the default cube
@@ -165,7 +165,7 @@ Goodbye! 👋
 ### Dry-run (preview only)
 
 ```bash
-blender-copilot --dry-run
+blender-cli --dry-run
 ```
 
 Generates and prints the code without touching Blender — useful for reviewing or learning Blender Python.
@@ -181,11 +181,11 @@ blender-cli/
 └── cli/
     ├── package.json
     ├── bin/
-    │   └── blender-copilot.js    # Executable entry point
+    │   └── blender-cli.js    # Executable entry point
     └── src/
         ├── index.js         # Interactive REPL, spinner, session history
         ├── copilot.js       # GitHub Copilot Chat API client
-        └── blender.js       # File-based bridge (~/.blender-copilot/)
+        └── blender.js       # File-based bridge (~/.blender-cli/)
 ```
 
 ### Blender addon internals
@@ -198,7 +198,7 @@ The CLI polls `result.json` every 150 ms (matching the request ID) for up to 30 
 
 ## Security notes
 
-- All file I/O stays in `~/.blender-copilot/` on your local machine — no network port is opened.
+- All file I/O stays in `~/.blender-cli/` on your local machine — no network port is opened.
 - `exec()` runs with full Python access inside the Blender process. Only run code you trust.
 - Your GitHub token is read from `gh auth token` and sent to `api.githubcopilot.com` over HTTPS; it is never stored on disk by this tool.
 

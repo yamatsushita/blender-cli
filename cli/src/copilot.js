@@ -15,6 +15,9 @@ const COPILOT_ENDPOINT = 'api.githubcopilot.com';
 
 /** Preferred models in priority order — use actual IDs from GET /models. */
 const MODEL_PRIORITY = [
+  'claude-opus-4.6',
+  'claude-opus-4.5',
+  'claude-opus-4.7',
   'gpt-4.1',
   'gpt-5.4',
   'claude-sonnet-4.6',

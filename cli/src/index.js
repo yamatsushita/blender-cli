@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * blender-copilot interactive REPL
+ * blender-cli interactive REPL
  *
- * Usage: blender-copilot [--dry-run] [--no-launch] [--help]
+ * Usage: blender-cli [--dry-run] [--no-launch] [--help]
  *
  * --dry-run    Generate code but do NOT send it to Blender
  * --no-launch  Skip auto-launching Blender (use if Blender is already open)
@@ -55,10 +55,10 @@ function spinner(label) {
 
 function printHelp() {
   console.log(`
-${fmt(c.bold + c.cyan, 'blender-copilot')} — edit your Blender scene with natural language
+${fmt(c.bold + c.cyan, 'blender-cli')} — edit your Blender scene with natural language
 
 ${fmt(c.bold, 'USAGE')}
-  blender-copilot [--dry-run] [--no-launch] [--help]
+  blender-cli [--dry-run] [--no-launch] [--help]
 
 ${fmt(c.bold, 'OPTIONS')}
   --dry-run    Generate code but do NOT send to Blender
