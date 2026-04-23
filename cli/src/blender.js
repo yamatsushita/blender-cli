@@ -58,6 +58,28 @@ CODE_FILE      = SESSION_DIR / "run.py"
 RESULT_FILE    = SESSION_DIR / "result.json"
 HEARTBEAT_FILE = SESSION_DIR / "heartbeat"
 
+
+def _find_view3d_context():
+    """Return kwargs for bpy.context.temp_override() using the first VIEW_3D."""
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            # Prefer the WINDOW region (the main 3D viewport, not toolbars)
+            region = next(
+                (r for r in area.regions if r.type == 'WINDOW'),
+                area.regions[-1],
+            )
+            return {
+                'window': window,
+                'screen': window.screen,
+                'area': area,
+                'region': region,
+                'space_data': area.spaces.active,
+            }
+    return {}
+
+
 def _copilot_poll():
     HEARTBEAT_FILE.write_text(str(time.time()), encoding="utf-8")
     if not TRIGGER_FILE.exists():
@@ -69,7 +91,13 @@ def _copilot_poll():
     except OSError:
         return 0.25
     try:
-        exec(textwrap.dedent(code), {"bpy": bpy})
+        ctx = _find_view3d_context()
+        ns = {"bpy": bpy}
+        if ctx:
+            with bpy.context.temp_override(**ctx):
+                exec(textwrap.dedent(code), ns)
+        else:
+            exec(textwrap.dedent(code), ns)
         res = {"id": rid, "success": True}
         for w in bpy.context.window_manager.windows:
             for a in w.screen.areas:

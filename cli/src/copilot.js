@@ -37,6 +37,15 @@ RULES:
 2. The global "bpy" is always available — do not re-import unless needed.
 3. Use bpy.ops, bpy.data, bpy.context as appropriate.
 4. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
+5. Your code runs inside a bpy.context.temp_override() that targets the active
+   VIEW_3D area, so viewport operators (view3d.view_camera, view3d.view_axis,
+   view3d.zoom, etc.) work without any additional context setup in your code.
+   Never add your own context override for VIEW_3D operators — it is already done.
+6. For non-viewport operators that need a specific context (e.g. node editor),
+   you may still use bpy.context.temp_override() as needed.
+
+Example – "switch to camera view":
+bpy.ops.view3d.view_camera()
 
 Example – "add a red cube at the origin":
 import bpy
