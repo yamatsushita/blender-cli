@@ -51,18 +51,63 @@ function extractImageUrls(text) {
 }
 
 /**
- * Build OpenAI-compatible multimodal user message content.
- * If the prompt contains image URLs, returns an array with text + image_url parts.
- * Otherwise returns the plain string (cheaper, avoids vision token cost).
- * @param {string} text
- * @returns {string | Array}
+ * Download an image URL and return a base64 data URI.
+ * Follows up to 5 redirects. Returns null on failure.
+ * @param {string} url
+ * @returns {Promise<string|null>}
  */
-function buildUserContent(text) {
+function fetchImageAsBase64(url, redirectsLeft = 5) {
+  return new Promise((resolve) => {
+    const mod = url.startsWith('https') ? https : require('http');
+    const req = mod.get(url, { headers: { 'User-Agent': 'blender-cli/2.0' } }, (res) => {
+      // Follow redirects (301/302/303/307/308)
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirectsLeft > 0) {
+        resolve(fetchImageAsBase64(res.headers.location, redirectsLeft - 1));
+        return;
+      }
+      if (res.statusCode !== 200) { resolve(null); return; }
+      const contentType = res.headers['content-type'] ?? 'image/jpeg';
+      const mimeType = contentType.split(';')[0].trim();
+      const chunks = [];
+      res.on('data', (d) => chunks.push(d));
+      res.on('end', () => {
+        const b64 = Buffer.concat(chunks).toString('base64');
+        resolve(`data:${mimeType};base64,${b64}`);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(15_000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * Build OpenAI-compatible multimodal user message content.
+ * Downloads any image URLs to base64 data URIs (Copilot API rejects external URLs).
+ * Returns the plain string when no images are present.
+ * @param {string} text
+ * @returns {Promise<string | Array>}
+ */
+async function buildUserContent(text) {
   const imageUrls = extractImageUrls(text);
   if (imageUrls.length === 0) return text;
+
+  // Download all images in parallel; skip any that fail
+  const downloaded = await Promise.all(
+    imageUrls.map(async (url) => {
+      const dataUri = await fetchImageAsBase64(url);
+      return dataUri ? { url, dataUri } : null;
+    })
+  );
+  const valid = downloaded.filter(Boolean);
+
+  if (valid.length === 0) return text; // all downloads failed — send text only
+
   return [
     { type: 'text', text },
-    ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url, detail: 'high' } })),
+    ...valid.map(({ dataUri }) => ({
+      type: 'image_url',
+      image_url: { url: dataUri, detail: 'high' },
+    })),
   ];
 }
 
@@ -375,7 +420,7 @@ async function planAssets(userPrompt) {
         '                {"type": "texture", "query": "wood floor", "key": "wood_texture"}]}\n' +
         '  "Add a red cube" -> {"assets": []}',
     },
-    { role: 'user', content: buildUserContent(userPrompt) },
+    { role: 'user', content: await buildUserContent(userPrompt) },
   ];
   const payload = JSON.stringify({ model, messages, max_tokens: 300, temperature: 0 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
@@ -422,7 +467,7 @@ async function getCopilotResponse(userPrompt, history = [], opts = {}) {
       userPrompt;
   }
   // Wrap with image URLs if present (multimodal content)
-  messages.push({ role: 'user', content: buildUserContent(userContent) });
+  messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
   // Fetch with automatic continuation if the response is truncated (finish_reason='length').
   let fullRaw = '';
@@ -505,7 +550,7 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
       `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
       userPrompt;
   }
-  messages.push({ role: 'user', content: buildUserContent(userContent) });
+  messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
   // --- Line-buffered streaming state machine ---
   // Phase transitions:
