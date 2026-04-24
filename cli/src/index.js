@@ -260,15 +260,33 @@ async function main() {
       rl.resume(); rl.prompt(); return;
     }
 
+    // ── Patch common Blender 4.x enum mistakes ────────────────────────────────
+    // Belt-and-suspenders: fix known wrong values the model sometimes generates,
+    // regardless of what the system prompt says.
+    const patchedCode = code
+      // view_settings.look: strip bare contrast names that lack 'AgX - ' prefix
+      .replace(
+        /\.look\s*=\s*['"](?!AgX |None)((?:Very |Medium )?(High|Low|Base|Greyscale|Punchy)[^'"]*)['"]/g,
+        (_, name) => `.look = 'AgX - ${name}'`
+      )
+      // Blender 3.x EEVEE engine name → 4.x
+      .replace(/'BLENDER_EEVEE'(?!_NEXT)/g, "'BLENDER_EEVEE_NEXT'")
+      // Old Principled BSDF input names → Blender 4.x names
+      .replace(/'Clearcoat Roughness'/g, "'Coat Roughness'")
+      .replace(/'Clearcoat'/g, "'Coat Weight'")
+      .replace(/\['Specular'\]/g, "['Specular IOR Level']")
+      .replace(/\['Sheen'\](?!\s*\.\s*default_value\s*=\s*\()/g, "['Sheen Weight']")
+      .replace(/\['Emission'\](?=\s*\]\s*\.default_value\s*=\s*\()/g, "['Emission Color']");
+
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);
     const border = fmt(c.dim, '─'.repeat(60));
     console.log(border);
-    code.split('\n').forEach(l => console.log('  ' + fmt(c.magenta, l)));
+    patchedCode.split('\n').forEach(l => console.log('  ' + fmt(c.magenta, l)));
     console.log(border + '\n');
 
     if (args.dryRun) {
       console.log(fmt(c.yellow, '  [dry-run] Skipping Blender execution.\n'));
-      history.push({ prompt: line, code });
+      history.push({ prompt: line, code: patchedCode });
       rl.resume(); rl.prompt(); return;
     }
 
@@ -293,11 +311,11 @@ async function main() {
         `ASSET_DIR = r'${assetPathEsc}'\n` +
         `ASSET_PATH = ASSET_DIR  # alias kept for compatibility\n` +
         `ASSETS = {\n${assetsLiteral}\n}\n`;
-      const execCode = preamble + code;
+      const execCode = preamble + patchedCode;
       const result = await executeInBlender(execCode, blenderPaths);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated'));
-        history.push({ prompt: line, code });
+        history.push({ prompt: line, code: patchedCode });
       } else {
         spin2.stop(fmt(c.red, `✖ Blender error: ${result.error ?? 'unknown'}`));
       }

@@ -201,6 +201,27 @@ RULES:
 
 5. For all other operations use bpy.ops, bpy.data, bpy.context as normal.
 
+6. BLENDER 4.x ENUM VALUES -- use EXACTLY these strings (wrong values raise errors):
+
+   view_settings.look (color management):
+     VALID:   'None'  OR  'AgX - Base Contrast'  OR  'AgX - Punchy'
+              Full list: 'AgX - Very Low Contrast', 'AgX - Low Contrast',
+              'AgX - Medium Low Contrast', 'AgX - Base Contrast',
+              'AgX - Medium High Contrast', 'AgX - High Contrast',
+              'AgX - Very High Contrast', 'AgX - Greyscale', 'AgX - Punchy'
+     WRONG:   'Medium High Contrast'  ← missing 'AgX - ' prefix!
+     SAFE DEFAULT: bpy.context.scene.view_settings.look = 'AgX - Medium High Contrast'
+
+   Principled BSDF inputs (Blender 4.x node names):
+     Use 'Specular IOR Level' NOT 'Specular'
+     Use 'Coat Weight'        NOT 'Clearcoat'
+     Use 'Coat Roughness'     NOT 'Clearcoat Roughness'
+     Use 'Emission Color'     NOT 'Emission'   (strength is 'Emission Strength')
+     Use 'Sheen Weight'       NOT 'Sheen'
+
+   render.engine values: 'CYCLES', 'BLENDER_EEVEE_NEXT', 'BLENDER_WORKBENCH'
+     (NOT 'BLENDER_EEVEE' -- that was Blender 3.x)
+
 Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'wood_texture': '...'}):
 <thinking>
 ASSETS has bunny_model (could be .blend/.obj/.gltf) and wood_texture (image path).
