@@ -220,7 +220,7 @@ function launchBlender(blenderPath) {
   fs.mkdirSync(p.dir, { recursive: true });
   fs.writeFileSync(p.startupFile, buildStartupScript(p.dir), 'utf8');
 
-  const child = spawn(blenderPath, ['--python', p.startupFile], {
+  const child = spawn(blenderPath, ['--no-splash', '--python', p.startupFile], {
     detached: true,
     stdio: 'ignore',
   });
