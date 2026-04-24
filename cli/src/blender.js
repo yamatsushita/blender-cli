@@ -141,6 +141,16 @@ def _copilot_poll():
 if not bpy.app.timers.is_registered(_copilot_poll):
     bpy.app.timers.register(_copilot_poll, persistent=True)
     print(f"[Copilot Bridge] Session {SESSION_DIR.name!r} active")
+
+def _dismiss_splash():
+    """Close the splash screen once Blender is ready."""
+    try:
+        bpy.ops.wm.splash('INVOKE_DEFAULT')
+    except Exception:
+        pass
+    return None  # run once only
+
+bpy.app.timers.register(_dismiss_splash, first_interval=0.5)
 `;
 }
 
@@ -224,7 +234,7 @@ function launchBlender(blenderPath) {
 
   // Redirect Blender stdout/stderr to a log file so crashes are diagnosable.
   const logFd = fs.openSync(p.logFile, 'w');
-  const child = spawn(blenderPath, ['--no-splash', '--python', p.startupFile], {
+  const child = spawn(blenderPath, ['--python', p.startupFile], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
   });
