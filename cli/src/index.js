@@ -217,8 +217,8 @@ async function main() {
         spin.update('Asking GitHub Copilot...');
 
         // Set up live thinking display.
-        // We stop the spinner just before printing thinking lines so the
-        // animated cursor doesn't interleave with streaming text.
+        // We stop the spinner just before printing the first thinking line so
+        // the animated cursor never interleaves with streaming text.
         const border = fmt(c.dim, '─'.repeat(60));
         let thinkingHeaderPrinted = false;
 
@@ -229,7 +229,7 @@ async function main() {
             thinkingHeaderPrinted = true;
           },
           onThinkingLine(thinkLine) {
-            process.stdout.write('  ' + fmt(c.dim, thinkLine) + '\n');
+            process.stdout.write('  ' + fmt(c.cyan, thinkLine) + '\n');
           },
           onThinkingEnd() {
             process.stdout.write(border + '\n');
@@ -237,9 +237,19 @@ async function main() {
         });
         thinking = response.thinking;
         code = response.code;
-        // If no thinking was streamed, stop the spinner now
+
+        // If no <thinking> was streamed, stop the spinner now
         if (!thinkingHeaderPrinted) {
           spin.stop(fmt(c.green, '✔ Code generated'));
+        }
+
+        // If thinking was returned via parseResponse fallback (model didn't use
+        // streaming tags), display it now as a block
+        if (!thinkingHeaderPrinted && thinking) {
+          console.log(`\n${fmt(c.bold, '💭 Reasoning:')}`);
+          console.log(border);
+          thinking.split('\n').forEach((l) => console.log('  ' + fmt(c.cyan, l)));
+          console.log(border);
         }
       } catch (err) {
         spin.stop(fmt(c.red, `✖ Copilot error: ${err.message}`));

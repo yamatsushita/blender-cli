@@ -577,11 +577,9 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
   }
   messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
-  // --- Line-buffered streaming state machine ---
-  // Phase transitions:
-  //   'pre'      → waiting for <thinking> opening tag
-  //   'thinking' → inside thinking block, emit lines live via callbacks
-  //   'code'     → after </thinking>, buffer the Python code
+  // --- Streaming state machine ---
+  // Handles <thinking> tags regardless of whether they share a line with other content.
+  // Phases: 'pre' → 'thinking' → 'code'
   let lineBuffer = '';
   let fullRaw = '';
   let phase = 'pre';
@@ -589,37 +587,56 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
   let codeBuffer = '';
   let thinkingStarted = false;
 
+  // Process one logical line through the state machine.
+  // Handles <thinking> / </thinking> appearing anywhere on the line.
+  const processLine = (line) => {
+    if (phase === 'pre') {
+      const startIdx = line.indexOf('<thinking>');
+      if (startIdx !== -1) {
+        phase = 'thinking';
+        if (!thinkingStarted) {
+          thinkingStarted = true;
+          callbacks.onThinkingStart?.();
+        }
+        // Recurse on content after the opening tag (handles same-line close too)
+        const rest = line.slice(startIdx + '<thinking>'.length);
+        if (rest) processLine(rest);
+      }
+      // Lines before <thinking> are silently discarded
+    } else if (phase === 'thinking') {
+      const endIdx = line.indexOf('</thinking>');
+      if (endIdx !== -1) {
+        // Emit content before the closing tag
+        const before = line.slice(0, endIdx);
+        if (before.trim()) {
+          thinkingLines.push(before);
+          callbacks.onThinkingLine?.(before);
+        }
+        phase = 'code';
+        callbacks.onThinkingEnd?.();
+        // Anything after </thinking> on the same line goes to code
+        const after = line.slice(endIdx + '</thinking>'.length).trim();
+        if (after) codeBuffer += after + '\n';
+      } else {
+        thinkingLines.push(line);
+        callbacks.onThinkingLine?.(line);
+      }
+    } else {
+      // phase === 'code'
+      codeBuffer += line + '\n';
+    }
+  };
+
   const processToken = (tokenText) => {
     fullRaw += tokenText;
     lineBuffer += tokenText;
 
-    // Process every complete line (split on \n)
+    // Drain all complete lines from the buffer
     let nl;
     while ((nl = lineBuffer.indexOf('\n')) !== -1) {
       const line = lineBuffer.slice(0, nl);
       lineBuffer = lineBuffer.slice(nl + 1);
-
-      if (phase === 'pre') {
-        if (line.trim() === '<thinking>') {
-          phase = 'thinking';
-          if (!thinkingStarted) {
-            thinkingStarted = true;
-            callbacks.onThinkingStart?.();
-          }
-        }
-        // pre lines (before <thinking>) are not emitted
-      } else if (phase === 'thinking') {
-        if (line.trim() === '</thinking>') {
-          phase = 'code';
-          callbacks.onThinkingEnd?.();
-        } else {
-          thinkingLines.push(line);
-          callbacks.onThinkingLine?.(line);
-        }
-      } else {
-        // phase === 'code'
-        codeBuffer += line + '\n';
-      }
+      processLine(line);
     }
   };
 
@@ -636,14 +653,9 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     120_000,
   );
 
-  // Flush any remaining lineBuffer content
+  // Flush any remaining content in lineBuffer (last partial line with no trailing \n)
   if (lineBuffer) {
-    if (phase === 'code') {
-      codeBuffer += lineBuffer;
-    } else if (phase === 'thinking') {
-      thinkingLines.push(lineBuffer);
-      callbacks.onThinkingLine?.(lineBuffer);
-    }
+    processLine(lineBuffer);
     lineBuffer = '';
   }
 
