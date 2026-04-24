@@ -443,13 +443,129 @@ async function resolveBlend(query, log = () => {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Sketchfab search (free CC0/CC-BY models, no auth required for search)
+// ---------------------------------------------------------------------------
+
+/**
+ * Search Sketchfab for a downloadable CC0 model by query term.
+ * Returns { uid, name, downloadUrl } or null.
+ * Note: downloading from Sketchfab requires auth — this returns metadata only;
+ * the actual download URL is resolved separately if a direct link is known.
+ */
+async function searchSketchfab(query) {
+  try {
+    const url =
+      `https://api.sketchfab.com/v3/models?q=${encodeURIComponent(query)}` +
+      `&license=cc0&downloadable=true&sort_by=-likeCount&count=5`;
+    const { statusCode, body } = await httpsGet(url);
+    if (statusCode !== 200) return null;
+    const data = JSON.parse(body);
+    const model = data.results?.[0];
+    if (!model) return null;
+    return { uid: model.uid, name: model.name, slug: model.slug };
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Direct URL resolver — download any publicly accessible asset
+// ---------------------------------------------------------------------------
+
+/** Map file extensions to their asset subdirectory. */
+const EXT_TO_SUBDIR = {
+  obj: 'models', gltf: 'models', glb: 'models', fbx: 'models', blend: 'blends',
+  png: 'textures', jpg: 'textures', jpeg: 'textures', webp: 'textures',
+  exr: 'hdris', hdr: 'hdris',
+};
+
+/**
+ * Download an asset from a direct URL, storing it under the appropriate subfolder.
+ * The format is inferred from the URL's file extension.
+ * @param {string} url   Direct HTTP/HTTPS URL to the file
+ * @param {string} key   Snake-case key used to derive the local filename
+ * @param {(msg: string) => void} [log]
+ * @returns {Promise<{absPath: string, name: string}|null>}
+ */
+async function resolveUrl(url, key, log = () => {}) {
+  try {
+    // Strip query strings to find the real extension
+    const pathname = new URL(url).pathname.toLowerCase();
+    const ext = pathname.split('.').pop().replace(/[^a-z0-9]/g, '');
+    const subdir = EXT_TO_SUBDIR[ext];
+    if (!subdir) {
+      log(`Unknown extension ".${ext}" for URL: ${url}`);
+      return null;
+    }
+    const destDir = path.join(ASSET_ROOT, subdir);
+    fs.mkdirSync(destDir, { recursive: true });
+    const localName = `${key}.${ext}`;
+    const localPath = path.join(destDir, localName);
+    if (!fs.existsSync(localPath)) {
+      log(`Downloading ${localName} from URL...`);
+      await downloadFile(url, localPath);
+    }
+    log(`Asset ready: ${subdir}/${localName}`);
+    return { absPath: localPath, name: key };
+  } catch (err) {
+    log(`Failed to download URL "${url}": ${err.message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Batch downloader
 // ---------------------------------------------------------------------------
 
 /**
+ * Download a file from an arbitrary URL, guessing the right subfolder from
+ * the file extension and an optional hint ('model'|'texture'|'hdri'|'blend').
+ * Returns the absolute local path, or null on failure.
+ *
+ * @param {string} key        - asset key (used to name the file)
+ * @param {string} url        - direct download URL
+ * @param {string} [hint]     - 'model'|'texture'|'hdri'|'blend'
+ * @param {Function} [log]
+ * @returns {Promise<string|null>}
+ */
+async function downloadFromUrl(key, url, hint = '', log = () => {}) {
+  try {
+    const urlObj = new URL(url);
+    const remoteName = path.basename(urlObj.pathname).split('?')[0];
+    const ext = (remoteName.match(/\.([^.]+)$/) ?? [])[1]?.toLowerCase() ?? '';
+
+    // Choose destination directory
+    let destDir;
+    if (hint === 'texture' || ['jpg','jpeg','png','tiff','exr','hdr'].includes(ext) && hint !== 'hdri') {
+      destDir = (hint === 'hdri' || ext === 'exr' || ext === 'hdr') ? HDRIS_DIR : TEXTURES_DIR;
+    } else if (hint === 'hdri' || ext === 'exr' || ext === 'hdr') {
+      destDir = HDRIS_DIR;
+    } else if (hint === 'blend' || ext === 'blend') {
+      destDir = BLENDS_DIR;
+    } else {
+      destDir = MODELS_DIR;
+    }
+
+    const safeName = key.replace(/[^a-z0-9_\-]/gi, '_');
+    const localPath = path.join(destDir, `${safeName}.${ext || 'bin'}`);
+
+    if (fs.existsSync(localPath)) {
+      log(`Cached: ${path.basename(localPath)}`);
+      return localPath;
+    }
+
+    log(`Downloading from web: ${remoteName}...`);
+    await downloadFile(url, localPath);
+    log(`Downloaded: ${path.basename(localPath)}`);
+    return localPath;
+  } catch (err) {
+    log(`Warning: failed to download ${url}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Download all requested assets and return a {key: absPath} mapping.
  *
- * @param {Array<{type: 'model'|'texture'|'hdri'|'blend', query: string, key: string}>} assetList
+ * @param {Array<{type: 'model'|'texture'|'hdri'|'blend', query: string, key: string, url?: string}>} assetList
  * @param {(msg: string) => void} [log]
  * @returns {Promise<Record<string, string>>}  key -> absolute path
  */
@@ -458,6 +574,11 @@ async function downloadAssets(assetList, log = () => {}) {
   for (const item of assetList) {
     try {
       let r = null;
+      // If a direct URL was provided (e.g. from web search), use it first
+      if (item.url) {
+        const localPath = await downloadFromUrl(item.key, item.url, item.type, log);
+        if (localPath) { result[item.key] = localPath; continue; }
+      }
       if      (item.type === 'model')   r = await resolveModel(item.query, log);
       else if (item.type === 'texture') r = await resolveTexture(item.query, log);
       else if (item.type === 'hdri')    r = await resolveHDRI(item.query, log);
@@ -473,6 +594,6 @@ async function downloadAssets(assetList, log = () => {}) {
 module.exports = {
   ASSET_ROOT,
   MODELS_DIR, TEXTURES_DIR, HDRIS_DIR, BLENDS_DIR,
-  downloadAssets,
+  downloadAssets, downloadFromUrl,
   resolveModel, resolveTexture, resolveHDRI, resolveBlend,
 };

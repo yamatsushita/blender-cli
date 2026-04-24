@@ -15,7 +15,7 @@
 const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
-const { getCopilotResponse, getCopilotResponseStream, planAssets, discoverModel } = require('./copilot');
+const { getCopilotResponse, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel } = require('./copilot');
 const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
   executeInBlender,
@@ -206,9 +206,13 @@ async function main() {
       // ── Step 1: detect & download assets ──────────────────────────────────
       const spin = spinner('Thinking...');
       try {
-        const assetList = await planAssets(line);
+        let assetList = await planAssets(line);
+
+        // ── Step 1b: web-search for direct download URLs ───────────────────
         if (assetList.length > 0) {
-          const labels = assetList.map((a) => `${a.key}(${a.type})`).join(', ');
+          spin.update('Searching web for assets...');
+          assetList = await searchWebAssets(line, assetList);
+          const labels = assetList.map((a) => `${a.key}(${a.type}${a.url ? '+url' : ''})`).join(', ');
           spin.update(`Downloading assets: ${labels}...`);
           assetDict = await downloadAssets(assetList, (msg) => spin.update(msg));
         }
