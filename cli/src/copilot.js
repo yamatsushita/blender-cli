@@ -117,12 +117,19 @@ Your job is to generate Python code (using the bpy module) that fulfills the use
 When the user provides an image URL, you CAN and MUST look at the image to understand
 what 3D scene to create. Describe briefly what you see, then generate matching Blender code.
 
-RESPONSE FORMAT -- you MUST follow this exactly, no exceptions:
-<thinking>
-Explain step-by-step: what the user wants, which Blender API calls to use, any special
-considerations (e.g. how to use pre-downloaded assets, complex node setups, context requirements).
-</thinking>
-<Python code here -- no fences, no other text, starts immediately after </thinking>>
+RESPONSE FORMAT -- you MUST follow this EXACTLY, with no variations:
+
+## REASONING: <one-line summary of what you're doing>
+## <more reasoning lines, each starting with "## ">
+## <as many lines as needed>
+<Python code starts here on the very next line after the last ## line, no blank line in between>
+
+CRITICAL FORMAT RULES:
+- Every reasoning line MUST start with "## " (hash hash space)
+- The FIRST line of your response must be "## REASONING: ..." 
+- Python code starts IMMEDIATELY after the last "## " line — no blank lines, no ```fences```
+- Do NOT wrap code in markdown code fences
+- Do NOT output any text after the Python code
 
 ALWAYS-AVAILABLE VARIABLES (injected into every execution):
 - ASSET_DIR : str  -- absolute path to the root asset library DIRECTORY (not a file!).
@@ -227,10 +234,8 @@ RULES:
      (use 'BLENDER_EEVEE' for all EEVEE — both Blender 3.x and 4.x accept it)
 
 Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'wood_texture': '...'}):
-<thinking>
-ASSETS has bunny_model (could be .blend/.obj/.gltf) and wood_texture (image path).
-Use import_model() helper to handle any format, then apply the texture material.
-</thinking>
+## REASONING: Import the bunny (format unknown, use import_model helper).
+## Apply wood texture via Principled BSDF ShaderNodeTexImage node.
 def import_model(key):
     fp = ASSETS[key]; ext = fp.rsplit('.', 1)[-1].lower()
     bpy.ops.object.select_all(action='DESELECT')
@@ -405,11 +410,35 @@ function stripCodeFences(text) {
 }
 
 /**
- * Parse a model response that may contain <thinking>...</thinking> before code.
+ * Parse a model response.
+ * Primary format:  leading lines starting with "## " are reasoning, rest is code.
+ * Fallback format: legacy <thinking>...</thinking> XML tags.
  * @param {string} raw
  * @returns {{ thinking: string|null, code: string }}
  */
 function parseResponse(raw) {
+  // Primary: "## " prefix lines at the top
+  const lines = raw.split('\n');
+  const reasoningLines = [];
+  let codeStart = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('## ')) {
+      reasoningLines.push(lines[i].slice(3)); // strip "## " prefix
+      codeStart = i + 1;
+    } else if (i === 0 && lines[i].trim() === '') {
+      codeStart = 1; // skip optional leading blank line
+    } else {
+      break;
+    }
+  }
+  if (reasoningLines.length > 0) {
+    return {
+      thinking: reasoningLines.join('\n').trim() || null,
+      code: stripCodeFences(lines.slice(codeStart).join('\n').trim()),
+    };
+  }
+
+  // Fallback: legacy <thinking>...</thinking> tags
   const match = raw.match(/<thinking>([\s\S]*?)<\/thinking>/i);
   if (!match) return { thinking: null, code: stripCodeFences(raw.trim()) };
   const thinking = match[1].trim();
@@ -593,21 +622,19 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
   messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
   // --- Streaming state machine ---
-  // Two parallel paths for thinking content:
-  //   Path A: API delivers thinking via delta.thinking / delta.reasoning_content
-  //           → received with isThinking=true flag from streamHttpsRequest
-  //   Path B: Model embeds <thinking>...</thinking> tags in delta.content text
-  //           → detected by the line-buffered state machine below
-  let lineBuffer = '';   // buffer for Path B (text content)
-  let fullRaw = '';      // accumulated text content (for fallback parseResponse)
-  let thinkingRaw = '';  // accumulated thinking content from Path A
-
-  let phase = 'pre';     // Path B state: 'pre' | 'thinking' | 'code'
+  // The response format uses "## " prefix lines for reasoning, then raw Python code.
+  // We also handle:
+  //   Path A: API native thinking fields (delta.thinking / delta.reasoning_content)
+  //   Path B: legacy <thinking> XML tags embedded in delta.content
+  //
+  // Phase: 'reasoning' = still reading "## " lines | 'code' = reading Python code
+  let lineBuffer = '';
+  let fullRaw = '';
+  let thinkingStarted = false;
+  let thinkingEnded = false;
   let thinkingLines = [];
   let codeBuffer = '';
-  let thinkingStarted = false;
 
-  // Emit a thinking line to the callbacks (shared by both paths).
   const emitThinkingLine = (line) => {
     if (!thinkingStarted) {
       thinkingStarted = true;
@@ -617,66 +644,61 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     callbacks.onThinkingLine?.(line);
   };
 
-  // Buffer for Path A (native thinking field): emit line-by-line
-  let thinkingLineBuffer = '';
-  const flushThinkingLineBuffer = (final = false) => {
-    thinkingLineBuffer += '';
-    let nl;
-    while ((nl = thinkingLineBuffer.indexOf('\n')) !== -1) {
-      const ln = thinkingLineBuffer.slice(0, nl);
-      thinkingLineBuffer = thinkingLineBuffer.slice(nl + 1);
-      emitThinkingLine(ln);
-    }
-    if (final && thinkingLineBuffer) {
-      emitThinkingLine(thinkingLineBuffer);
-      thinkingLineBuffer = '';
-    }
-  };
-
-  // Process one logical line of text content through the Path B state machine.
+  // Process one complete line of text content.
   const processLine = (line) => {
-    if (phase === 'pre') {
-      const startIdx = line.indexOf('<thinking>');
-      if (startIdx !== -1) {
-        phase = 'thinking';
-        const rest = line.slice(startIdx + '<thinking>'.length);
-        if (rest) processLine(rest);
+    if (!thinkingEnded) {
+      // "## " prefix → reasoning line
+      if (line.startsWith('## ')) {
+        emitThinkingLine(line.slice(3));
+        return;
       }
-      // Lines before <thinking> are discarded (they are preamble/prose)
-    } else if (phase === 'thinking') {
-      const endIdx = line.indexOf('</thinking>');
-      if (endIdx !== -1) {
-        const before = line.slice(0, endIdx);
-        if (before.trim()) emitThinkingLine(before);
-        phase = 'code';
+      // Blank line before any reasoning started → skip
+      if (!thinkingStarted && line.trim() === '') return;
+      // First non-"## " line after reasoning started → switch to code
+      if (thinkingStarted) {
+        thinkingEnded = true;
         callbacks.onThinkingEnd?.();
-        const after = line.slice(endIdx + '</thinking>'.length).trim();
-        if (after) codeBuffer += after + '\n';
-      } else {
-        emitThinkingLine(line);
+        // This line is code (fall through)
       }
-    } else {
-      codeBuffer += line + '\n';
+      // Legacy: <thinking> tag embedded in text
+      if (!thinkingStarted && line.includes('<thinking>')) {
+        const rest = line.slice(line.indexOf('<thinking>') + '<thinking>'.length);
+        if (rest.trim()) emitThinkingLine(rest.trim());
+        return;
+      }
+      if (thinkingStarted && !thinkingEnded && line.includes('</thinking>')) {
+        thinkingEnded = true;
+        callbacks.onThinkingEnd?.();
+        const after = line.slice(line.indexOf('</thinking>') + '</thinking>'.length).trim();
+        if (after) codeBuffer += after + '\n';
+        return;
+      }
+    }
+    codeBuffer += line + '\n';
+  };
+
+  // Path A: native thinking field from the API (delta.thinking etc.)
+  let nativeThinkingBuffer = '';
+  const processNativeThinking = (text) => {
+    nativeThinkingBuffer += text;
+    let nl;
+    while ((nl = nativeThinkingBuffer.indexOf('\n')) !== -1) {
+      emitThinkingLine(nativeThinkingBuffer.slice(0, nl));
+      nativeThinkingBuffer = nativeThinkingBuffer.slice(nl + 1);
     }
   };
 
-  // Main token handler — called by streamHttpsRequest for every delta.
   const processToken = (tokenText, isThinking) => {
     if (isThinking) {
-      // Path A: native thinking field — emit line-by-line
-      thinkingRaw += tokenText;
-      thinkingLineBuffer += tokenText;
-      flushThinkingLineBuffer(false);
-    } else {
-      // Path B: regular text content
-      fullRaw += tokenText;
-      lineBuffer += tokenText;
-      let nl;
-      while ((nl = lineBuffer.indexOf('\n')) !== -1) {
-        const line = lineBuffer.slice(0, nl);
-        lineBuffer = lineBuffer.slice(nl + 1);
-        processLine(line);
-      }
+      processNativeThinking(tokenText);
+      return;
+    }
+    fullRaw += tokenText;
+    lineBuffer += tokenText;
+    let nl;
+    while ((nl = lineBuffer.indexOf('\n')) !== -1) {
+      processLine(lineBuffer.slice(0, nl));
+      lineBuffer = lineBuffer.slice(nl + 1);
     }
   };
 
@@ -693,16 +715,11 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     120_000,
   );
 
-  // Flush any remaining partial lines
-  if (thinkingLineBuffer) flushThinkingLineBuffer(true);
+  // Flush remaining partial lines
+  if (nativeThinkingBuffer) { emitThinkingLine(nativeThinkingBuffer); nativeThinkingBuffer = ''; }
   if (lineBuffer) { processLine(lineBuffer); lineBuffer = ''; }
-
-  // Close the thinking block if it was opened but not closed
-  if (thinkingStarted && phase === 'thinking') {
-    phase = 'code';
-    callbacks.onThinkingEnd?.();
-  } else if (thinkingStarted && thinkingRaw && phase === 'pre') {
-    // Path A delivered thinking but Path B never saw <thinking> in text
+  if (thinkingStarted && !thinkingEnded) {
+    thinkingEnded = true;
     callbacks.onThinkingEnd?.();
   }
 
@@ -725,7 +742,7 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     }
   }
 
-  // If neither path produced thinking, fall back to parseResponse on the full raw text
+  // If no streaming reasoning was captured, fall back to parseResponse on full text
   if (!thinkingStarted) {
     return parseResponse(fullRaw);
   }
