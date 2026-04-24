@@ -377,6 +377,7 @@ async function planAssets(userPrompt) {
     },
     { role: 'user', content: buildUserContent(userPrompt) },
   ];
+  const payload = JSON.stringify({ model, messages, max_tokens: 300, temperature: 0 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   try {
