@@ -127,7 +127,7 @@ RESPONSE FORMAT -- you MUST follow this EXACTLY, with no variations:
 CRITICAL FORMAT RULES:
 - Every reasoning line MUST start with "## " (hash hash space)
 - The FIRST line of your response must be "## REASONING: ..." 
-- Python code starts IMMEDIATELY after the last "## " line — no blank lines, no ```fences```
+- Python code starts IMMEDIATELY after the last "## " line — no blank lines, no markdown fences
 - Do NOT wrap code in markdown code fences
 - Do NOT output any text after the Python code
 
