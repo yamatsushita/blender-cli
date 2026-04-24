@@ -269,8 +269,8 @@ async function main() {
         /\.look\s*=\s*['"](?!AgX |None)((?:Very |Medium )?(High|Low|Base|Greyscale|Punchy)[^'"]*)['"]/g,
         (_, name) => `.look = 'AgX - ${name}'`
       )
-      // Blender 3.x EEVEE engine name → 4.x
-      .replace(/'BLENDER_EEVEE'(?!_NEXT)/g, "'BLENDER_EEVEE_NEXT'")
+      // Blender 3.x EEVEE engine name — keep as-is, both versions exist
+      .replace(/'BLENDER_EEVEE_NEXT'/g, "'BLENDER_EEVEE'")
       // Old Principled BSDF input names → Blender 4.x names
       .replace(/'Clearcoat Roughness'/g, "'Coat Roughness'")
       .replace(/'Clearcoat'/g, "'Coat Weight'")

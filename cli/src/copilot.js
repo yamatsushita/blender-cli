@@ -219,8 +219,8 @@ RULES:
      Use 'Emission Color'     NOT 'Emission'   (strength is 'Emission Strength')
      Use 'Sheen Weight'       NOT 'Sheen'
 
-   render.engine values: 'CYCLES', 'BLENDER_EEVEE_NEXT', 'BLENDER_WORKBENCH'
-     (NOT 'BLENDER_EEVEE' -- that was Blender 3.x)
+   render.engine values: 'CYCLES', 'BLENDER_EEVEE', 'BLENDER_WORKBENCH'
+     (use 'BLENDER_EEVEE' for all EEVEE — both Blender 3.x and 4.x accept it)
 
 Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'wood_texture': '...'}):
 <thinking>
