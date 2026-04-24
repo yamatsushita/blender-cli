@@ -54,16 +54,50 @@ ALWAYS-AVAILABLE VARIABLES (injected into every execution):
 - ASSET_PATH : str -- same as ASSET_DIR (backward-compat alias). Treat identically.
 - os, math, mathutils are pre-imported -- do NOT import them again.
 
-IMPORTING ASSETS -- use ASSETS['key'] for the file path, never ASSET_DIR:
-  WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder, not a file!
+IMPORTING ASSETS -- use ASSETS['key'] for the file path, NEVER ASSET_DIR as a filepath:
+  WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder!
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_PATH)  # ← same problem
-  CORRECT OBJ:  bpy.ops.wm.obj_import(filepath=ASSETS['bunny_model'])
-  CORRECT GLTF: bpy.ops.import_scene.gltf(filepath=ASSETS['some_model'])
-  CORRECT TEX:
+
+  MODEL IMPORT -- the file could be .blend, .gltf, or .obj depending on what was available.
+  ALWAYS use this helper; NEVER hardcode bpy.ops.wm.obj_import or bpy.ops.import_scene.gltf directly:
+      def import_model(key):
+          fp = ASSETS[key]
+          ext = fp.rsplit('.', 1)[-1].lower()
+          bpy.ops.object.select_all(action='DESELECT')
+          if ext == 'blend':
+              with bpy.data.libraries.load(fp, link=False) as (data_from, data_to):
+                  data_to.objects = list(data_from.objects)
+              for obj in data_to.objects:
+                  if obj is not None:
+                      bpy.context.scene.collection.objects.link(obj)
+                      obj.select_set(True)
+          elif ext in ('gltf', 'glb'):
+              bpy.ops.import_scene.gltf(filepath=fp)
+          else:  # .obj
+              bpy.ops.wm.obj_import(filepath=fp)
+          return list(bpy.context.selected_objects)
+      objs = import_model('tree_model')   # returns list of imported objects
+      obj = objs[0] if objs else bpy.context.active_object
+
+  TEXTURE:
       img = bpy.data.images.load(ASSETS['wood_texture'])
       tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
       tex_node.image = img
       mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+
+  HDRI environment map (sky/background lighting):
+      world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')
+      bpy.context.scene.world = world
+      world.use_nodes = True
+      nt = world.node_tree
+      nt.nodes.clear()
+      bg  = nt.nodes.new('ShaderNodeBackground')
+      env = nt.nodes.new('ShaderNodeTexEnvironment')
+      out = nt.nodes.new('ShaderNodeOutputWorld')
+      env.image = bpy.data.images.load(ASSETS['sky_hdri'])
+      nt.links.new(env.outputs['Color'], bg.inputs['Color'])
+      nt.links.new(bg.outputs['Background'], out.inputs['Surface'])
+      bg.inputs['Strength'].default_value = 1.0
 
 RULES:
 1. The global "bpy" is always available. "os", "math", and "mathutils" are also available.
@@ -84,12 +118,20 @@ RULES:
 
 Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'wood_texture': '...'}):
 <thinking>
-ASSETS has bunny_model (OBJ path) and wood_texture (image path).
-I import the OBJ using ASSETS['bunny_model'], create a Principled BSDF material,
-load the texture from ASSETS['wood_texture'], wire it to Base Color.
+ASSETS has bunny_model (could be .blend/.obj/.gltf) and wood_texture (image path).
+Use import_model() helper to handle any format, then apply the texture material.
 </thinking>
-bpy.ops.wm.obj_import(filepath=ASSETS['bunny_model'])
-obj = bpy.context.active_object
+def import_model(key):
+    fp = ASSETS[key]; ext = fp.rsplit('.', 1)[-1].lower()
+    bpy.ops.object.select_all(action='DESELECT')
+    if ext == 'blend':
+        with bpy.data.libraries.load(fp, link=False) as (df, dt): dt.objects = list(df.objects)
+        [bpy.context.scene.collection.objects.link(o) or o.select_set(True) for o in dt.objects if o]
+    elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=fp)
+    else: bpy.ops.wm.obj_import(filepath=fp)
+    return list(bpy.context.selected_objects)
+objs = import_model('bunny_model')
+obj = objs[0] if objs else bpy.context.active_object
 mat = bpy.data.materials.new(name="Wood")
 mat.use_nodes = True
 bsdf = mat.node_tree.nodes["Principled BSDF"]

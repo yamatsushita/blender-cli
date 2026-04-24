@@ -225,18 +225,60 @@ async function resolveModel(query, log = () => {}) {
   const phAsset = await searchPolyHaven(query, 'models');
   if (phAsset) {
     const files = await getPolyHavenFiles(phAsset.id);
-    const gltfUrl = files?.gltf?.['1k']?.gltf?.url ?? files?.gltf?.['2k']?.gltf?.url;
-    const objUrl  = files?.obj?.['1k']?.obj?.url   ?? files?.obj?.['2k']?.obj?.url;
-    const dlUrl = gltfUrl ?? objUrl;
-    const fmt   = gltfUrl ? 'gltf' : 'obj';
-    if (dlUrl) {
-      const localPath = path.join(MODELS_DIR, `${phAsset.id}.${fmt}`);
-      if (!fs.existsSync(localPath)) {
-        log(`Downloading model: ${phAsset.id}.${fmt}...`);
-        await downloadFile(dlUrl, localPath);
+    if (files) {
+      // Poly Haven file structure per format at a given resolution:
+      //   { url, size, md5, include: { "relative/path": {url, size, md5}, ... } }
+      // "include" maps relative paths to companion files that MUST be downloaded
+      // next to (or in subdirs relative to) the main file for the importer to work.
+      // e.g. GLTF companion: "bark_debris_01.bin", "textures/diff_1k.jpg"
+      //      blend companion: "textures/diff_1k.jpg", "textures/rough_1k.exr"
+      const downloadBundle = async (formatObj, destDir) => {
+        fs.mkdirSync(destDir, { recursive: true });
+        // Main file
+        const mainFname = path.basename(new URL(formatObj.url).pathname);
+        const mainPath  = path.join(destDir, mainFname);
+        if (!fs.existsSync(mainPath)) {
+          log(`Downloading: ${mainFname}...`);
+          await downloadFile(formatObj.url, mainPath);
+        }
+        // Companion files listed under "include" — keys are relative paths
+        for (const [relPath, fileInfo] of Object.entries(formatObj.include ?? {})) {
+          if (!fileInfo?.url) continue;
+          const localPath = path.join(destDir, relPath);
+          fs.mkdirSync(path.dirname(localPath), { recursive: true });
+          if (!fs.existsSync(localPath)) {
+            log(`Downloading: ${path.basename(relPath)}...`);
+            await downloadFile(fileInfo.url, localPath);
+          }
+        }
+        return mainPath;
+      };
+
+      const assetDir = path.join(MODELS_DIR, phAsset.id);
+
+      // a. Prefer .blend (preserves materials, rigging, and linked textures)
+      const blendFmt = files?.blend?.['1k']?.blend ?? files?.blend?.['2k']?.blend;
+      if (blendFmt?.url) {
+        const blendPath = await downloadBundle(blendFmt, assetDir);
+        log(`Model ready (.blend): models/${phAsset.id}/`);
+        return { absPath: blendPath, format: 'blend', name: phAsset.id };
       }
-      log(`Model ready: models/${phAsset.id}.${fmt}`);
-      return { absPath: localPath, format: fmt, name: phAsset.id };
+
+      // b. OBJ + companion files (MTL, textures)
+      const objFmt = files?.obj?.['1k']?.obj ?? files?.obj?.['2k']?.obj;
+      if (objFmt?.url) {
+        const objPath = await downloadBundle(objFmt, assetDir);
+        log(`Model ready (OBJ): models/${phAsset.id}/`);
+        return { absPath: objPath, format: 'obj', name: phAsset.id };
+      }
+
+      // c. GLTF + companion files (.bin, textures) — all must be in same subdir
+      const gltfFmt = files?.gltf?.['1k']?.gltf ?? files?.gltf?.['2k']?.gltf;
+      if (gltfFmt?.url) {
+        const gltfPath = await downloadBundle(gltfFmt, assetDir);
+        log(`Model ready (GLTF): models/${phAsset.id}/`);
+        return { absPath: gltfPath, format: 'gltf', name: phAsset.id };
+      }
     }
   }
 
@@ -374,17 +416,30 @@ async function resolveBlend(query, log = () => {}) {
   const files = await getPolyHavenFiles(phAsset.id);
   if (!files) return null;
 
-  // Poly Haven blend format: files.blend['1k'].blend.url
-  const blendUrl = files?.blend?.['1k']?.blend?.url ?? files?.blend?.['2k']?.blend?.url;
-  if (!blendUrl) { log(`No .blend format available for "${phAsset.id}"`); return null; }
+  // Poly Haven blend format: files.blend['1k'].blend has {url, include: {...}}
+  const blendFmt = files?.blend?.['1k']?.blend ?? files?.blend?.['2k']?.blend;
+  if (!blendFmt?.url) { log(`No .blend format available for "${phAsset.id}"`); return null; }
 
-  const localPath = path.join(BLENDS_DIR, `${phAsset.id}.blend`);
-  if (!fs.existsSync(localPath)) {
-    log(`Downloading .blend: ${phAsset.id}.blend...`);
-    await downloadFile(blendUrl, localPath);
+  // Download .blend + all companion textures under "include" key
+  const assetDir = path.join(BLENDS_DIR, phAsset.id);
+  fs.mkdirSync(assetDir, { recursive: true });
+  const mainFname = path.basename(new URL(blendFmt.url).pathname);
+  const mainPath  = path.join(assetDir, mainFname);
+  if (!fs.existsSync(mainPath)) {
+    log(`Downloading .blend: ${mainFname}...`);
+    await downloadFile(blendFmt.url, mainPath);
   }
-  log(`.blend ready: blends/${phAsset.id}.blend`);
-  return { absPath: localPath, name: phAsset.id };
+  for (const [relPath, fileInfo] of Object.entries(blendFmt.include ?? {})) {
+    if (!fileInfo?.url) continue;
+    const localFile = path.join(assetDir, relPath);
+    fs.mkdirSync(path.dirname(localFile), { recursive: true });
+    if (!fs.existsSync(localFile)) {
+      log(`Downloading: ${path.basename(relPath)}...`);
+      await downloadFile(fileInfo.url, localFile);
+    }
+  }
+  log(`.blend ready: blends/${phAsset.id}/`);
+  return { absPath: mainPath, name: phAsset.id };
 }
 
 // ---------------------------------------------------------------------------
