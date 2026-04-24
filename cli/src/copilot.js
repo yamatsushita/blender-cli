@@ -597,12 +597,9 @@ async function searchWebAssets(userPrompt, assetList) {
 }
 
 
- * @param {string} userPrompt
- * @param {Array<{prompt: string, code: string}>} history
- * @param {{assetDict?: Record<string, string>}} [opts]
- * @returns {Promise<{thinking: string|null, code: string}>}
- */
-async function getCopilotResponse(userPrompt, history = [], opts = {}) {
+/**
+ * Generate Blender Python code with reasoning from a natural language prompt.
+ * @param {string} userPromptuserPrompt, history = [], opts = {}) {
   const token = getGitHubToken();
   const model = await discoverModel();
 
