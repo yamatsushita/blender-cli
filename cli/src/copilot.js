@@ -295,7 +295,9 @@ function httpsRequest(options, body = null, timeoutMs = 60_000) {
 
 /**
  * SSE-streaming variant of httpsRequest.
- * Calls onToken(text) for each content delta.
+ * Calls onToken(text, isThinking) for each content delta.
+ *   isThinking=true  → token is from a thinking/reasoning field (not shown as code)
+ *   isThinking=false → token is regular text/code content
  * Resolves with { finishReason } when the stream ends.
  */
 function streamHttpsRequest(options, body, onToken, timeoutMs = 120_000) {
@@ -324,9 +326,22 @@ function streamHttpsRequest(options, body, onToken, timeoutMs = 120_000) {
           try {
             const data = JSON.parse(raw);
             const choice = data.choices?.[0];
-            const content = choice?.delta?.content ?? '';
-            if (choice?.finish_reason) finishReason = choice.finish_reason;
-            if (content) onToken(content);
+            if (!choice) continue;
+            if (choice.finish_reason) finishReason = choice.finish_reason;
+
+            // Regular text content
+            const content = choice.delta?.content ?? '';
+            if (content) onToken(content, false);
+
+            // Thinking / reasoning content — various field names used by different APIs:
+            //   delta.thinking            (Anthropic-style via some wrappers)
+            //   delta.reasoning           (generic)
+            //   delta.reasoning_content   (OpenAI o-series style)
+            const thinkingContent =
+              choice.delta?.thinking ??
+              choice.delta?.reasoning ??
+              choice.delta?.reasoning_content ?? '';
+            if (thinkingContent) onToken(thinkingContent, true);
           } catch (_) {}
         }
       });
@@ -578,65 +593,90 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
   messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
   // --- Streaming state machine ---
-  // Handles <thinking> tags regardless of whether they share a line with other content.
-  // Phases: 'pre' → 'thinking' → 'code'
-  let lineBuffer = '';
-  let fullRaw = '';
-  let phase = 'pre';
+  // Two parallel paths for thinking content:
+  //   Path A: API delivers thinking via delta.thinking / delta.reasoning_content
+  //           → received with isThinking=true flag from streamHttpsRequest
+  //   Path B: Model embeds <thinking>...</thinking> tags in delta.content text
+  //           → detected by the line-buffered state machine below
+  let lineBuffer = '';   // buffer for Path B (text content)
+  let fullRaw = '';      // accumulated text content (for fallback parseResponse)
+  let thinkingRaw = '';  // accumulated thinking content from Path A
+
+  let phase = 'pre';     // Path B state: 'pre' | 'thinking' | 'code'
   let thinkingLines = [];
   let codeBuffer = '';
   let thinkingStarted = false;
 
-  // Process one logical line through the state machine.
-  // Handles <thinking> / </thinking> appearing anywhere on the line.
+  // Emit a thinking line to the callbacks (shared by both paths).
+  const emitThinkingLine = (line) => {
+    if (!thinkingStarted) {
+      thinkingStarted = true;
+      callbacks.onThinkingStart?.();
+    }
+    thinkingLines.push(line);
+    callbacks.onThinkingLine?.(line);
+  };
+
+  // Buffer for Path A (native thinking field): emit line-by-line
+  let thinkingLineBuffer = '';
+  const flushThinkingLineBuffer = (final = false) => {
+    thinkingLineBuffer += '';
+    let nl;
+    while ((nl = thinkingLineBuffer.indexOf('\n')) !== -1) {
+      const ln = thinkingLineBuffer.slice(0, nl);
+      thinkingLineBuffer = thinkingLineBuffer.slice(nl + 1);
+      emitThinkingLine(ln);
+    }
+    if (final && thinkingLineBuffer) {
+      emitThinkingLine(thinkingLineBuffer);
+      thinkingLineBuffer = '';
+    }
+  };
+
+  // Process one logical line of text content through the Path B state machine.
   const processLine = (line) => {
     if (phase === 'pre') {
       const startIdx = line.indexOf('<thinking>');
       if (startIdx !== -1) {
         phase = 'thinking';
-        if (!thinkingStarted) {
-          thinkingStarted = true;
-          callbacks.onThinkingStart?.();
-        }
-        // Recurse on content after the opening tag (handles same-line close too)
         const rest = line.slice(startIdx + '<thinking>'.length);
         if (rest) processLine(rest);
       }
-      // Lines before <thinking> are silently discarded
+      // Lines before <thinking> are discarded (they are preamble/prose)
     } else if (phase === 'thinking') {
       const endIdx = line.indexOf('</thinking>');
       if (endIdx !== -1) {
-        // Emit content before the closing tag
         const before = line.slice(0, endIdx);
-        if (before.trim()) {
-          thinkingLines.push(before);
-          callbacks.onThinkingLine?.(before);
-        }
+        if (before.trim()) emitThinkingLine(before);
         phase = 'code';
         callbacks.onThinkingEnd?.();
-        // Anything after </thinking> on the same line goes to code
         const after = line.slice(endIdx + '</thinking>'.length).trim();
         if (after) codeBuffer += after + '\n';
       } else {
-        thinkingLines.push(line);
-        callbacks.onThinkingLine?.(line);
+        emitThinkingLine(line);
       }
     } else {
-      // phase === 'code'
       codeBuffer += line + '\n';
     }
   };
 
-  const processToken = (tokenText) => {
-    fullRaw += tokenText;
-    lineBuffer += tokenText;
-
-    // Drain all complete lines from the buffer
-    let nl;
-    while ((nl = lineBuffer.indexOf('\n')) !== -1) {
-      const line = lineBuffer.slice(0, nl);
-      lineBuffer = lineBuffer.slice(nl + 1);
-      processLine(line);
+  // Main token handler — called by streamHttpsRequest for every delta.
+  const processToken = (tokenText, isThinking) => {
+    if (isThinking) {
+      // Path A: native thinking field — emit line-by-line
+      thinkingRaw += tokenText;
+      thinkingLineBuffer += tokenText;
+      flushThinkingLineBuffer(false);
+    } else {
+      // Path B: regular text content
+      fullRaw += tokenText;
+      lineBuffer += tokenText;
+      let nl;
+      while ((nl = lineBuffer.indexOf('\n')) !== -1) {
+        const line = lineBuffer.slice(0, nl);
+        lineBuffer = lineBuffer.slice(nl + 1);
+        processLine(line);
+      }
     }
   };
 
@@ -653,10 +693,17 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     120_000,
   );
 
-  // Flush any remaining content in lineBuffer (last partial line with no trailing \n)
-  if (lineBuffer) {
-    processLine(lineBuffer);
-    lineBuffer = '';
+  // Flush any remaining partial lines
+  if (thinkingLineBuffer) flushThinkingLineBuffer(true);
+  if (lineBuffer) { processLine(lineBuffer); lineBuffer = ''; }
+
+  // Close the thinking block if it was opened but not closed
+  if (thinkingStarted && phase === 'thinking') {
+    phase = 'code';
+    callbacks.onThinkingEnd?.();
+  } else if (thinkingStarted && thinkingRaw && phase === 'pre') {
+    // Path A delivered thinking but Path B never saw <thinking> in text
+    callbacks.onThinkingEnd?.();
   }
 
   // If the model was cut off, do a non-streaming continuation
@@ -666,7 +713,6 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
       role: 'user',
       content: 'Continue exactly where you left off. Output only the remaining Python code, no preamble.',
     });
-    // Non-streaming continuation
     const contPayload = JSON.stringify({ model, messages, max_tokens: 8192, temperature: 0.2 });
     const contHeaders = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(contPayload) };
     const { statusCode, body } = await httpsRequest(
@@ -679,8 +725,8 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     }
   }
 
-  // If the response had no <thinking> block, fall back to parsing the raw output
-  if (phase === 'pre' || (phase === 'thinking' && thinkingLines.length === 0)) {
+  // If neither path produced thinking, fall back to parseResponse on the full raw text
+  if (!thinkingStarted) {
     return parseResponse(fullRaw);
   }
 
