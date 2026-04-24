@@ -224,6 +224,52 @@ function httpsRequest(options, body = null, timeoutMs = 60_000) {
 }
 
 /**
+ * SSE-streaming variant of httpsRequest.
+ * Calls onToken(text) for each content delta.
+ * Resolves with { finishReason } when the stream ends.
+ */
+function streamHttpsRequest(options, body, onToken, timeoutMs = 120_000) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      if (res.statusCode !== 200) {
+        const chunks = [];
+        res.on('data', (d) => chunks.push(d));
+        res.on('end', () => {
+          let detail = Buffer.concat(chunks).toString();
+          try { detail = JSON.parse(detail).error?.message ?? detail; } catch (_) {}
+          reject(new Error(`Copilot API error ${res.statusCode}: ${detail}`));
+        });
+        return;
+      }
+      let partial = '';
+      let finishReason = null;
+      res.on('data', (chunk) => {
+        partial += chunk.toString();
+        const lines = partial.split('\n');
+        partial = lines.pop(); // keep last incomplete line
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') { resolve({ finishReason }); return; }
+          try {
+            const data = JSON.parse(raw);
+            const choice = data.choices?.[0];
+            const content = choice?.delta?.content ?? '';
+            if (choice?.finish_reason) finishReason = choice.finish_reason;
+            if (content) onToken(content);
+          } catch (_) {}
+        }
+      });
+      res.on('end', () => resolve({ finishReason }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Stream timed out after ${timeoutMs / 1000}s`)));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/**
  * Query GET /models and return the best available chat model ID.
  * Falls back to the first item in MODEL_PRIORITY if the request fails.
  * @returns {Promise<string>}
@@ -423,7 +469,144 @@ async function getCopilotCode(userPrompt, history = []) {
   return code;
 }
 
+/**
+ * Streaming version of getCopilotResponse.
+ *
+ * Streams the model output and calls callbacks as tokens arrive so thinking
+ * can be displayed in real-time on the CLI.
+ *
+ * @param {string} userPrompt
+ * @param {Array<{prompt: string, code: string}>} history
+ * @param {{assetDict?: Record<string, string>}} [opts]
+ * @param {{
+ *   onThinkingStart?: () => void,
+ *   onThinkingLine?: (line: string) => void,
+ *   onThinkingEnd?: () => void,
+ * }} [callbacks]
+ * @returns {Promise<{thinking: string|null, code: string}>}
+ */
+async function getCopilotResponseStream(userPrompt, history = [], opts = {}, callbacks = {}) {
+  const token = getGitHubToken();
+  const model = await discoverModel();
+
+  const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+  for (const { prompt, code } of history) {
+    messages.push({ role: 'user', content: prompt });
+    messages.push({ role: 'assistant', content: code });
+  }
+
+  let userContent = userPrompt;
+  if (opts.assetDict && Object.keys(opts.assetDict).length > 0) {
+    const listing = Object.entries(opts.assetDict)
+      .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
+      .join(',\n');
+    userContent =
+      `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
+      userPrompt;
+  }
+  messages.push({ role: 'user', content: buildUserContent(userContent) });
+
+  // --- Line-buffered streaming state machine ---
+  // Phase transitions:
+  //   'pre'      → waiting for <thinking> opening tag
+  //   'thinking' → inside thinking block, emit lines live via callbacks
+  //   'code'     → after </thinking>, buffer the Python code
+  let lineBuffer = '';
+  let fullRaw = '';
+  let phase = 'pre';
+  let thinkingLines = [];
+  let codeBuffer = '';
+  let thinkingStarted = false;
+
+  const processToken = (tokenText) => {
+    fullRaw += tokenText;
+    lineBuffer += tokenText;
+
+    // Process every complete line (split on \n)
+    let nl;
+    while ((nl = lineBuffer.indexOf('\n')) !== -1) {
+      const line = lineBuffer.slice(0, nl);
+      lineBuffer = lineBuffer.slice(nl + 1);
+
+      if (phase === 'pre') {
+        if (line.trim() === '<thinking>') {
+          phase = 'thinking';
+          if (!thinkingStarted) {
+            thinkingStarted = true;
+            callbacks.onThinkingStart?.();
+          }
+        }
+        // pre lines (before <thinking>) are not emitted
+      } else if (phase === 'thinking') {
+        if (line.trim() === '</thinking>') {
+          phase = 'code';
+          callbacks.onThinkingEnd?.();
+        } else {
+          thinkingLines.push(line);
+          callbacks.onThinkingLine?.(line);
+        }
+      } else {
+        // phase === 'code'
+        codeBuffer += line + '\n';
+      }
+    }
+  };
+
+  const payload = JSON.stringify({ model, messages, max_tokens: 8192, temperature: 0.2, stream: true });
+  const headers = {
+    ...copilotHeaders(token),
+    'Content-Length': Buffer.byteLength(payload),
+  };
+
+  const { finishReason } = await streamHttpsRequest(
+    { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
+    payload,
+    processToken,
+    120_000,
+  );
+
+  // Flush any remaining lineBuffer content
+  if (lineBuffer) {
+    if (phase === 'code') {
+      codeBuffer += lineBuffer;
+    } else if (phase === 'thinking') {
+      thinkingLines.push(lineBuffer);
+      callbacks.onThinkingLine?.(lineBuffer);
+    }
+    lineBuffer = '';
+  }
+
+  // If the model was cut off, do a non-streaming continuation
+  if (finishReason === 'length') {
+    messages.push({ role: 'assistant', content: fullRaw });
+    messages.push({
+      role: 'user',
+      content: 'Continue exactly where you left off. Output only the remaining Python code, no preamble.',
+    });
+    // Non-streaming continuation
+    const contPayload = JSON.stringify({ model, messages, max_tokens: 8192, temperature: 0.2 });
+    const contHeaders = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(contPayload) };
+    const { statusCode, body } = await httpsRequest(
+      { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers: contHeaders },
+      contPayload,
+    );
+    if (statusCode === 200) {
+      const cont = JSON.parse(body).choices?.[0]?.message?.content ?? '';
+      codeBuffer += cont;
+    }
+  }
+
+  // If the response had no <thinking> block, fall back to parsing the raw output
+  if (phase === 'pre' || (phase === 'thinking' && thinkingLines.length === 0)) {
+    return parseResponse(fullRaw);
+  }
+
+  const thinking = thinkingLines.join('\n').trim() || null;
+  const code = stripCodeFences(codeBuffer.trim());
+  return { thinking, code };
+}
+
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, getCopilotResponse, planAssets, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponse, getCopilotResponseStream, planAssets, discoverModel, resetModelCache };

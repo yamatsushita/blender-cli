@@ -15,7 +15,7 @@
 const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
-const { getCopilotResponse, planAssets, discoverModel } = require('./copilot');
+const { getCopilotResponse, getCopilotResponseStream, planAssets, discoverModel } = require('./copilot');
 const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
   executeInBlender,
@@ -213,25 +213,38 @@ async function main() {
           assetDict = await downloadAssets(assetList, (msg) => spin.update(msg));
         }
 
-        // ── Step 2: generate code with reasoning ───────────────────────────
+        // ── Step 2: generate code with streaming thinking ──────────────────
         spin.update('Asking GitHub Copilot...');
-        const response = await getCopilotResponse(line, history, { assetDict });
+
+        // Set up live thinking display.
+        // We stop the spinner just before printing thinking lines so the
+        // animated cursor doesn't interleave with streaming text.
+        const border = fmt(c.dim, '─'.repeat(60));
+        let thinkingHeaderPrinted = false;
+
+        const response = await getCopilotResponseStream(line, history, { assetDict }, {
+          onThinkingStart() {
+            spin.stop(fmt(c.green, '✔ Code generated'));
+            process.stdout.write(`\n${fmt(c.bold, '💭 Reasoning:')}\n${border}\n`);
+            thinkingHeaderPrinted = true;
+          },
+          onThinkingLine(thinkLine) {
+            process.stdout.write('  ' + fmt(c.dim, thinkLine) + '\n');
+          },
+          onThinkingEnd() {
+            process.stdout.write(border + '\n');
+          },
+        });
         thinking = response.thinking;
         code = response.code;
-        spin.stop(fmt(c.green, '✔ Code generated'));
+        // If no thinking was streamed, stop the spinner now
+        if (!thinkingHeaderPrinted) {
+          spin.stop(fmt(c.green, '✔ Code generated'));
+        }
       } catch (err) {
         spin.stop(fmt(c.red, `✖ Copilot error: ${err.message}`));
         rl.resume(); rl.prompt(); return;
       }
-    }
-
-    // ── Show reasoning ──────────────────────────────────────────────────────
-    if (thinking) {
-      console.log(`\n${fmt(c.bold, '💭 Reasoning:')}`);
-      const border = fmt(c.dim, '─'.repeat(60));
-      console.log(border);
-      thinking.split('\n').forEach((l) => console.log('  ' + fmt(c.dim, l)));
-      console.log(border);
     }
 
     // ── Detect non-Python prose response ─────────────────────────────────────
