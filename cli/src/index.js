@@ -276,7 +276,10 @@ async function main() {
       .replace(/'Clearcoat'/g, "'Coat Weight'")
       .replace(/\['Specular'\]/g, "['Specular IOR Level']")
       .replace(/\['Sheen'\](?!\s*\.\s*default_value\s*=\s*\()/g, "['Sheen Weight']")
-      .replace(/\['Emission'\](?=\s*\]\s*\.default_value\s*=\s*\()/g, "['Emission Color']");
+      .replace(/\['Emission'\](?=\s*\]\s*\.default_value\s*=\s*\()/g, "['Emission Color']")
+      // ParticleSettings: Blender 4.x renamed attributes
+      .replace(/\.child_nbr\b/g, '.child_count')
+      .replace(/\.child_radius\b/g, '.child_length');
 
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);
     const border = fmt(c.dim, '─'.repeat(60));

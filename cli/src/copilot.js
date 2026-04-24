@@ -219,6 +219,10 @@ RULES:
      Use 'Emission Color'     NOT 'Emission'   (strength is 'Emission Strength')
      Use 'Sheen Weight'       NOT 'Sheen'
 
+   ParticleSettings (Blender 4.x renamed attributes):
+     Use .child_count  NOT .child_nbr
+     Use .child_length NOT .child_radius  (hair children length)
+
    render.engine values: 'CYCLES', 'BLENDER_EEVEE', 'BLENDER_WORKBENCH'
      (use 'BLENDER_EEVEE' for all EEVEE — both Blender 3.x and 4.x accept it)
 
