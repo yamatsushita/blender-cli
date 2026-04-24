@@ -239,7 +239,7 @@ async function main() {
         .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
         .join(',\n');
       const preamble =
-        `import os, math\n` +
+        `import os, math, mathutils\n` +
         `ASSET_DIR = r'${assetPathEsc}'\n` +
         `ASSET_PATH = ASSET_DIR  # alias kept for compatibility\n` +
         `ASSETS = {\n${assetsLiteral}\n}\n`;

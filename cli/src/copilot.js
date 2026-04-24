@@ -50,6 +50,7 @@ ALWAYS-AVAILABLE VARIABLES (injected into every execution):
                         'wood_texture': '/path/assets/textures/wood_floor_diff_1k.jpg'}
     Use ASSETS.get('key') to safely access. ASSETS may be empty if nothing was downloaded.
 - ASSET_PATH : str -- same as ASSET_DIR (backward-compat alias). Treat identically.
+- os, math, mathutils are pre-imported — do NOT import them again.
 
 IMPORTING ASSETS -- use ASSETS['key'] for the file path, never ASSET_DIR:
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder, not a file!
@@ -63,7 +64,7 @@ IMPORTING ASSETS -- use ASSETS['key'] for the file path, never ASSET_DIR:
       mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
 
 RULES:
-1. The global "bpy" is always available. "os" and "math" are also available.
+1. The global "bpy" is always available. "os", "math", and "mathutils" are also available.
 2. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
 3. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D area.
    Prefer DIRECT PROPERTY ACCESS over operators for viewport changes:

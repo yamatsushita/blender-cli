@@ -106,8 +106,9 @@ def _poll_and_execute():
 
     result: dict
     try:
+        import mathutils as _mathutils
         view3d_areas = _get_all_view3d_areas()
-        ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
+        ns = {"bpy": bpy, "_view3d_areas": view3d_areas, "mathutils": _mathutils}
 
         # undo/redo need a plain window context; VIEW_3D override breaks their poll.
         if _is_window_op_only(code):

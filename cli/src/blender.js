@@ -113,7 +113,8 @@ def _copilot_poll():
         return 0.25
     try:
         view3d_areas = _get_all_view3d_areas()
-        ns = {"bpy": bpy, "_view3d_areas": view3d_areas}
+        import mathutils as _mathutils
+        ns = {"bpy": bpy, "_view3d_areas": view3d_areas, "mathutils": _mathutils}
         # undo/redo need a plain window context; VIEW_3D override breaks their poll.
         if _is_window_op_only(code):
             win = bpy.context.window_manager.windows[0]
