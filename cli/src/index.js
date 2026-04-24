@@ -14,6 +14,7 @@
 
 const readline = require('readline');
 const path = require('path');
+const fs = require('fs');
 const { getCopilotResponse, planAssets, discoverModel } = require('./copilot');
 const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
@@ -123,12 +124,33 @@ async function main() {
         const launched = launchBlender(blenderPath);
         blenderPaths = launched.paths;
         console.log(fmt(c.dim, `  Session: ${launched.sessionId}`));
+        console.log(fmt(c.dim, `  Log: ${launched.paths.logFile}`));
         const spin = spinner(`Launching ${blenderName}…`);
-        const ready = await waitForBlender(blenderPaths.heartbeatFile, 45000);
-        spin.stop(ready
-          ? fmt(c.green, '✔ Blender is ready')
-          : fmt(c.yellow, '⚠ Blender is taking longer than expected — proceeding anyway')
-        );
+
+        // Race: either heartbeat appears (success) or Blender exits early (crash)
+        const [ready, exitCode] = await Promise.all([
+          waitForBlender(blenderPaths.heartbeatFile, 45000),
+          launched.earlyExit,
+        ]);
+
+        if (exitCode !== null && exitCode !== 0) {
+          // Blender exited within 5 s — read the log for clues
+          let logSnippet = '';
+          try {
+            const log = fs.readFileSync(blenderPaths.logFile, 'utf8').trim();
+            const lines = log.split('\n');
+            logSnippet = '\n' + lines.slice(-10).map((l) => '    ' + l).join('\n');
+          } catch (_) {}
+          spin.stop(fmt(c.red, `✖ Blender exited immediately (code ${exitCode})`));
+          console.log(fmt(c.dim, `  Check the log for details: ${blenderPaths.logFile}`));
+          if (logSnippet) console.log(fmt(c.dim, logSnippet));
+          blenderPaths = null;
+        } else if (!ready) {
+          spin.stop(fmt(c.yellow, '⚠ Blender is taking longer than expected — proceeding anyway'));
+          console.log(fmt(c.dim, `  If Blender never opens, check: ${blenderPaths.logFile}`));
+        } else {
+          spin.stop(fmt(c.green, '✔ Blender is ready'));
+        }
         console.log('');
       }
     } else {

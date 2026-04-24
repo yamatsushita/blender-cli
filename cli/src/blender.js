@@ -38,6 +38,7 @@ function sessionPaths(sessionId) {
     codeFile:      path.join(dir, 'run.py'),
     resultFile:    path.join(dir, 'result.json'),
     heartbeatFile: path.join(dir, 'heartbeat'),
+    logFile:       path.join(dir, 'blender.log'),
   };
 }
 
@@ -210,9 +211,10 @@ function isBlenderRunning(heartbeatFile) {
 
 /**
  * Create a new session directory, write the startup script, and spawn
- * Blender pointing to it. Returns the session ID and paths.
+ * Blender pointing to it. Returns the session ID, paths, and a promise
+ * that resolves to an exit code if Blender exits within 5 s (null = still running).
  * @param {string} blenderPath
- * @returns {{ sessionId: string, paths: ReturnType<typeof sessionPaths> }}
+ * @returns {{ sessionId: string, paths: ReturnType<typeof sessionPaths>, earlyExit: Promise<number|null> }}
  */
 function launchBlender(blenderPath) {
   const sessionId = crypto.randomUUID();
@@ -220,12 +222,23 @@ function launchBlender(blenderPath) {
   fs.mkdirSync(p.dir, { recursive: true });
   fs.writeFileSync(p.startupFile, buildStartupScript(p.dir), 'utf8');
 
+  // Redirect Blender stdout/stderr to a log file so crashes are diagnosable.
+  const logFd = fs.openSync(p.logFile, 'w');
   const child = spawn(blenderPath, ['--no-splash', '--python', p.startupFile], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
   });
+  fs.closeSync(logFd);  // we have our own handle; child keeps its copy
+
+  // Resolve with exit code if Blender exits within 5 s; null if still running.
+  const earlyExit = new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 5000);
+    child.once('exit', (code) => { clearTimeout(timer); resolve(code ?? 0); });
+    child.once('error', (err)  => { clearTimeout(timer); resolve(-1); });
+  });
+
   child.unref();
-  return { sessionId, paths: p };
+  return { sessionId, paths: p, earlyExit };
 }
 
 /**
