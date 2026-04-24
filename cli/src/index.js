@@ -230,14 +230,18 @@ async function main() {
 
     const spin2 = spinner('Updating Blender scene...');
     try {
-      // Always inject ASSET_PATH (folder) and ASSETS dict into the executed code.
-      const assetPathEsc = ASSET_ROOT.replace(/\\/g, '\\\\');
+      // Inject ASSET_DIR (the folder root) and ASSETS (key→absPath dict) into
+      // every execution.  ASSET_DIR is intentionally named "DIR" so Copilot
+      // never mistakes it for a single-file path.  ASSET_PATH is kept as a
+      // backward-compat alias pointing to the same directory.
+      const assetPathEsc = ASSET_ROOT.replace(/\\/g, '/');
       const assetsLiteral = Object.entries(assetDict)
         .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
         .join(',\n');
       const preamble =
         `import os, math\n` +
-        `ASSET_PATH = '${assetPathEsc}'\n` +
+        `ASSET_DIR = r'${assetPathEsc}'\n` +
+        `ASSET_PATH = ASSET_DIR  # alias kept for compatibility\n` +
         `ASSETS = {\n${assetsLiteral}\n}\n`;
       const execCode = preamble + code;
       const result = await executeInBlender(execCode, blenderPaths);
