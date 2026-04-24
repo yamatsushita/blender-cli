@@ -234,6 +234,19 @@ async function main() {
       console.log(border);
     }
 
+    // ── Detect non-Python prose response ─────────────────────────────────────
+    // If the model returned a plain-language response instead of Python code
+    // (e.g. because it couldn't see an image), display it and skip execution.
+    const looksLikePython = /^\s*(import |from |bpy\.|#|def |class |\w+ *=)/m.test(code);
+    if (!looksLikePython) {
+      console.log(`\n${fmt(c.bold, '💬 Copilot response:')}`);
+      const border = fmt(c.dim, '─'.repeat(60));
+      console.log(border);
+      code.split('\n').forEach(l => console.log('  ' + fmt(c.cyan, l)));
+      console.log(border + '\n');
+      rl.resume(); rl.prompt(); return;
+    }
+
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);
     const border = fmt(c.dim, '─'.repeat(60));
     console.log(border);

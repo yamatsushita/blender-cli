@@ -28,9 +28,49 @@ const MODEL_PRIORITY = [
   'gpt-3.5-turbo',
 ];
 
+// ---------------------------------------------------------------------------
+// Vision helpers -- multimodal message construction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract image URLs from a text string.
+ * Recognises http/https URLs that are clearly images (by extension, or known
+ * image CDN patterns like Bing thumbnails, Sketchfab previews, imgur, etc.).
+ */
+function extractImageUrls(text) {
+  const urlRe = /https?:\/\/[^\s\])"'>]+/gi;
+  const rawUrls = text.match(urlRe) ?? [];
+  return rawUrls.filter((url) => {
+    const lower = url.toLowerCase();
+    // Image file extensions before any query string
+    if (/\.(jpg|jpeg|png|gif|webp|bmp|tiff?|avif)(\?|#|$)/.test(lower)) return true;
+    // Known image CDN / thumbnail hosts
+    if (/tse\d*\.mm\.bing\.net\/th\/|sketchfab\.com.*thumbnail|sketchfab\.com.*preview|cdn\.cloudflare\.steamstatic\.com|i\.imgur\.com|images\.unsplash\.com|upload\.wikimedia\.org|pbs\.twimg\.com|lh\d+\.googleusercontent\.com|graphics\.stanford\.edu\/data\//i.test(url)) return true;
+    return false;
+  });
+}
+
+/**
+ * Build OpenAI-compatible multimodal user message content.
+ * If the prompt contains image URLs, returns an array with text + image_url parts.
+ * Otherwise returns the plain string (cheaper, avoids vision token cost).
+ * @param {string} text
+ * @returns {string | Array}
+ */
+function buildUserContent(text) {
+  const imageUrls = extractImageUrls(text);
+  if (imageUrls.length === 0) return text;
+  return [
+    { type: 'text', text },
+    ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url, detail: 'high' } })),
+  ];
+}
+
 const SYSTEM_PROMPT = `\
-You are an expert Blender 3D Python API developer.
+You are an expert Blender 3D Python API developer with vision capabilities.
 Your job is to generate Python code (using the bpy module) that fulfills the user's request.
+When the user provides an image URL, you CAN and MUST look at the image to understand
+what 3D scene to create. Describe briefly what you see, then generate matching Blender code.
 
 RESPONSE FORMAT -- you MUST follow this exactly, no exceptions:
 <thinking>
@@ -289,10 +329,8 @@ async function planAssets(userPrompt) {
         '                {"type": "texture", "query": "wood floor", "key": "wood_texture"}]}\n' +
         '  "Add a red cube" -> {"assets": []}',
     },
-    { role: 'user', content: userPrompt },
+    { role: 'user', content: buildUserContent(userPrompt) },
   ];
-
-  const payload = JSON.stringify({ model, messages, max_tokens: 300, temperature: 0 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   try {
@@ -336,7 +374,8 @@ async function getCopilotResponse(userPrompt, history = [], opts = {}) {
       `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
       userPrompt;
   }
-  messages.push({ role: 'user', content: userContent });
+  // Wrap with image URLs if present (multimodal content)
+  messages.push({ role: 'user', content: buildUserContent(userContent) });
 
   // Fetch with automatic continuation if the response is truncated (finish_reason='length').
   let fullRaw = '';
