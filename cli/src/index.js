@@ -14,8 +14,8 @@
 
 const readline = require('readline');
 const path = require('path');
-const { getCopilotResponse, planAssetDownload, discoverModel } = require('./copilot');
-const { resolveAsset } = require('./assets');
+const { getCopilotResponse, planAssets, discoverModel } = require('./copilot');
+const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
   executeInBlender,
   isBlenderRunning,
@@ -68,7 +68,10 @@ ${fmt(c.bold, 'OPTIONS')}
   --help       Show this help
 
 ${fmt(c.bold, 'ENV VARS')}
-  BLENDER_PATH  Full path to the Blender executable (if not auto-detected)
+  BLENDER_PATH        Full path to the Blender executable (if not auto-detected)
+  BLENDER_ASSET_PATH  Asset library folder (default: ~/.blender-copilot/assets/)
+                      Models stored in <ASSET_PATH>/models/
+                      Textures stored in <ASSET_PATH>/textures/
 
 ${fmt(c.bold, 'REPL COMMANDS')}
   /undo        Undo the last operation in Blender
@@ -99,6 +102,8 @@ async function main() {
 
   console.log(`\n${fmt(c.bold + c.cyan, '🎨 Blender CLI')}`);
   console.log(fmt(c.dim, 'Type a natural language prompt, /help for commands, or Ctrl+C to quit.\n'));
+  console.log(fmt(c.dim, `  Asset library: ${ASSET_ROOT}`));
+  console.log(fmt(c.dim, `  (Override with env: BLENDER_ASSET_PATH)\n`));
 
   // ── Blender auto-launch ────────────────────────────────────────────────
   // sessionPaths is set when Blender is launched by this CLI invocation.
@@ -168,27 +173,25 @@ async function main() {
 
     let code;
     let thinking = null;
+    let assetDict = {};
 
     if (BUILTIN_COMMANDS[line]) {
       code = BUILTIN_COMMANDS[line];
       console.log(fmt(c.dim, '  [built-in command]'));
     } else {
-      // ── Step 1: detect & download external asset ─────────────────────────
-      let assetOpts = {};
-      const spin = spinner('Thinking…');
+      // ── Step 1: detect & download assets ──────────────────────────────────
+      const spin = spinner('Thinking...');
       try {
-        const plan = await planAssetDownload(line);
-        if (plan.needsAsset && plan.query) {
-          spin.update(`Searching for model: "${plan.query}"…`);
-          const asset = await resolveAsset(plan.query, (msg) => spin.update(msg));
-          if (asset) {
-            assetOpts = { assetPath: asset.path, assetFormat: asset.format };
-            spin.update(`Model ready: ${asset.name}.${asset.format} (${asset.source})`);
-          }
+        const assetList = await planAssets(line);
+        if (assetList.length > 0) {
+          const labels = assetList.map((a) => `${a.key}(${a.type})`).join(', ');
+          spin.update(`Downloading assets: ${labels}...`);
+          assetDict = await downloadAssets(assetList, (msg) => spin.update(msg));
         }
+
         // ── Step 2: generate code with reasoning ───────────────────────────
-        spin.update('Asking GitHub Copilot…');
-        const response = await getCopilotResponse(line, history, assetOpts);
+        spin.update('Asking GitHub Copilot...');
+        const response = await getCopilotResponse(line, history, { assetDict });
         thinking = response.thinking;
         code = response.code;
         spin.stop(fmt(c.green, '✔ Code generated'));
@@ -225,15 +228,18 @@ async function main() {
       rl.resume(); rl.prompt(); return;
     }
 
-    const spin2 = spinner('Updating Blender scene…');
+    const spin2 = spinner('Updating Blender scene...');
     try {
-      // Prepend ASSET_PATH as a real Python variable if an asset was downloaded.
-      let execCode = code;
-      if (assetOpts.assetPath) {
-        // Use raw string with backslashes escaped so Windows paths work.
-        const escaped = assetOpts.assetPath.replace(/\\/g, '\\\\');
-        execCode = `ASSET_PATH = '${escaped}'\n` + code;
-      }
+      // Always inject ASSET_PATH (folder) and ASSETS dict into the executed code.
+      const assetPathEsc = ASSET_ROOT.replace(/\\/g, '\\\\');
+      const assetsLiteral = Object.entries(assetDict)
+        .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
+        .join(',\n');
+      const preamble =
+        `import os, math\n` +
+        `ASSET_PATH = '${assetPathEsc}'\n` +
+        `ASSETS = {\n${assetsLiteral}\n}\n`;
+      const execCode = preamble + code;
       const result = await executeInBlender(execCode, blenderPaths);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated'));

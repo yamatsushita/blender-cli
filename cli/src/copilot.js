@@ -32,62 +32,68 @@ const SYSTEM_PROMPT = `\
 You are an expert Blender 3D Python API developer.
 Your job is to generate Python code (using the bpy module) that fulfills the user's request.
 
-RESPONSE FORMAT — you MUST follow this exactly, no exceptions:
+RESPONSE FORMAT -- you MUST follow this exactly, no exceptions:
 <thinking>
 Explain step-by-step: what the user wants, which Blender API calls to use, any special
-considerations (e.g. external assets, complex node setups, context requirements).
+considerations (e.g. how to use pre-downloaded assets, complex node setups, context requirements).
 </thinking>
-<Python code here — no fences, no other text, starts immediately after </thinking>>
+<Python code here -- no fences, no other text, starts immediately after </thinking>>
+
+ALWAYS-AVAILABLE VARIABLES (injected into every execution):
+- ASSET_PATH : str  -- absolute path to the root asset library folder.
+    Contains subfolders: models/ (OBJ/GLTF meshes) and textures/ (PNG/JPG maps).
+    Use os.path.join(ASSET_PATH, 'models', 'filename.obj') to build paths.
+- ASSETS : dict     -- pre-downloaded files for THIS request, mapping a descriptive
+    key (str) to an absolute file path (str).
+    Example: ASSETS = {'teapot_model': '/path/assets/models/utah_teapot.obj',
+                        'wood_texture': '/path/assets/textures/wood_floor_diff_1k.jpg'}
+    Use ASSETS.get('key') to safely access. ASSETS may be empty if nothing was downloaded.
+
+IMPORTING ASSETS:
+  - OBJ model:        bpy.ops.wm.obj_import(filepath=ASSETS['teapot_model'])
+  - GLTF/GLB model:   bpy.ops.import_scene.gltf(filepath=ASSETS['some_model'])
+  - Texture image (load into a material node):
+      img = bpy.data.images.load(ASSETS['wood_texture'])
+      tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
+      tex_node.image = img
+      mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
 
 RULES:
-1. The global "bpy" is always available — do not re-import unless needed.
+1. The global "bpy" is always available. "os" and "math" are also available.
 2. Keep code concise and correct. Make reasonable creative choices for ambiguous requests.
-3. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D
-   area, so most viewport operators work. However, prefer DIRECT PROPERTY ACCESS over
-   operators for viewport and perspective changes:
-
+3. Your code runs inside a bpy.context.temp_override() targeting the active VIEW_3D area.
+   Prefer DIRECT PROPERTY ACCESS over operators for viewport changes:
    - Camera view:       area.spaces[0].region_3d.view_perspective = 'CAMERA'
    - Perspective view:  area.spaces[0].region_3d.view_perspective = 'PERSP'
-   - Orthographic view: area.spaces[0].region_3d.view_perspective = 'ORTHO'
    - Shading mode:      area.spaces[0].shading.type = 'RENDERED'
    (loop over bpy.context.screen.areas, check area.type == 'VIEW_3D')
 
-4. UNDO / REDO — require a window-level context, NOT VIEW_3D. Use this exact pattern:
+4. UNDO / REDO -- require a window-level context, NOT VIEW_3D:
        win = bpy.context.window_manager.windows[0]
        with bpy.context.temp_override(window=win):
-           bpy.ops.ed.undo()    # or bpy.ops.ed.redo()
-   To undo N steps, loop N times (one bpy.ops.ed.undo() per iteration).
+           bpy.ops.ed.undo()    # repeat in a loop for multiple undos
 
-5. IMPORTING EXTERNAL ASSETS — if the variable ASSET_PATH is defined in the namespace,
-   an external 3D model has been pre-downloaded. Import it with the appropriate operator:
-   - .obj file:      bpy.ops.wm.obj_import(filepath=ASSET_PATH)
-   - .gltf/.glb:    bpy.ops.import_scene.gltf(filepath=ASSET_PATH)
-   After import, the newly added object(s) are active/selected. Apply transforms/
-   materials as needed. Do NOT attempt to download files yourself.
+5. For all other operations use bpy.ops, bpy.data, bpy.context as normal.
 
-6. For all other operations use bpy.ops, bpy.data, bpy.context as normal.
-
-Example — "undo 3 times":
+Example -- "place a teapot with wood texture" (when ASSETS has both):
 <thinking>
-The user wants to undo 3 times. undo/redo require a window context, not VIEW_3D.
-I'll loop 3 times, each time using temp_override(window=win).
+The user wants to import a teapot model and apply a wood texture.
+ASSETS['teapot_model'] has the OBJ path, ASSETS['wood_texture'] has the texture.
+I'll import the OBJ, create a Principled BSDF material, load the texture image,
+wire it to Base Color.
 </thinking>
-win = bpy.context.window_manager.windows[0]
-for _ in range(3):
-    with bpy.context.temp_override(window=win):
-        bpy.ops.ed.undo()
-
-Example — "add a red cube at the origin":
-<thinking>
-The user wants a red cube. I'll use primitive_cube_add, then create a Principled BSDF
-material with red base color and attach it.
-</thinking>
-bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+import os
+bpy.ops.wm.obj_import(filepath=ASSETS['teapot_model'])
 obj = bpy.context.active_object
-mat = bpy.data.materials.new(name="Red")
+mat = bpy.data.materials.new(name="Wood")
 mat.use_nodes = True
-mat.node_tree.nodes["Principled BSDF"].inputs['Base Color'].default_value = (1, 0, 0, 1)
-obj.data.materials.append(mat)
+bsdf = mat.node_tree.nodes["Principled BSDF"]
+img = bpy.data.images.load(ASSETS['wood_texture'])
+tex = mat.node_tree.nodes.new('ShaderNodeTexImage')
+tex.image = img
+mat.node_tree.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+if obj.data.materials: obj.data.materials[0] = mat
+else: obj.data.materials.append(mat)
 `;
 
 /** @type {string|null} Cached model ID for the session. */
@@ -194,12 +200,12 @@ function parseResponse(raw) {
 }
 
 /**
- * Ask Copilot whether this prompt requires downloading an external 3D model.
- * Returns { needsAsset: bool, query: string }.
+ * Ask Copilot to list all 3D assets (models + textures) needed for the prompt.
+ * Returns an array of {type, query, key} items to pass to downloadAssets().
  * @param {string} userPrompt
- * @returns {Promise<{needsAsset: boolean, query: string}>}
+ * @returns {Promise<Array<{type: 'model'|'texture', query: string, key: string}>>}
  */
-async function planAssetDownload(userPrompt) {
+async function planAssets(userPrompt) {
   const token = getGitHubToken();
   const model = await discoverModel();
 
@@ -208,18 +214,21 @@ async function planAssetDownload(userPrompt) {
       role: 'system',
       content:
         'You are a 3D asset detector. Analyze the Blender scene request and respond ONLY with valid JSON ' +
-        '(no markdown, no prose, no explanation).\n' +
-        'Format: {"needs_asset": <bool>, "query": "<search query for the 3D model file, or empty string>"}\n' +
-        'Set needs_asset=true ONLY if the request asks for a specific real-world or named 3D model that ' +
-        'is not built into Blender (e.g. "Stanford teapot", "Stanford bunny", "Utah teapot", a named scan, ' +
-        'a named famous test model). ' +
-        'Set needs_asset=false for anything Blender can create natively (cube, sphere, cylinder, torus, ' +
-        'cone, monkey/Suzanne, text, curve, light, camera, etc.).',
+        '(no markdown, no prose).\n' +
+        'Format: {"assets": [{"type": "model"|"texture", "query": "<search term>", "key": "<snake_case_id>"}]}\n\n' +
+        'Rules:\n' +
+        '- Include an asset ONLY if it is a specific named/real-world file not built into Blender.\n' +
+        '- type="model": named 3D meshes (e.g. "stanford teapot", "stanford bunny", "utah teapot").\n' +
+        '- type="texture": specific real-world surface textures (e.g. "oak wood floor", "brick wall",\n' +
+        '  "marble", "concrete"). Include when the user explicitly asks for a photo-realistic texture.\n' +
+        '- key: short snake_case identifier used in ASSETS dict (e.g. "teapot_model", "wood_texture").\n' +
+        '- Do NOT include anything Blender creates natively (cube, sphere, monkey, light, camera, etc.).\n' +
+        '- If nothing needs downloading, return {"assets": []}.',
     },
     { role: 'user', content: userPrompt },
   ];
 
-  const payload = JSON.stringify({ model, messages, max_tokens: 80, temperature: 0 });
+  const payload = JSON.stringify({ model, messages, max_tokens: 200, temperature: 0 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   try {
@@ -228,19 +237,20 @@ async function planAssetDownload(userPrompt) {
       payload,
       20_000,
     );
-    if (statusCode !== 200) return { needsAsset: false, query: '' };
+    if (statusCode !== 200) return [];
     const data = JSON.parse(body);
-    const raw = data.choices?.[0]?.message?.content ?? '{}';
-    const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
-    return { needsAsset: Boolean(parsed.needs_asset), query: parsed.query ?? '' };
-  } catch { return { needsAsset: false, query: '' }; }
+    const raw = (data.choices?.[0]?.message?.content ?? '{}')
+      .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.assets) ? parsed.assets : [];
+  } catch { return []; }
 }
 
 /**
  * Generate Blender Python code with reasoning from a natural language prompt.
  * @param {string} userPrompt
  * @param {Array<{prompt: string, code: string}>} history
- * @param {{assetPath?: string, assetFormat?: string}} [opts]
+ * @param {{assetDict?: Record<string, string>}} [opts]
  * @returns {Promise<{thinking: string|null, code: string}>}
  */
 async function getCopilotResponse(userPrompt, history = [], opts = {}) {
@@ -254,10 +264,12 @@ async function getCopilotResponse(userPrompt, history = [], opts = {}) {
   }
 
   let userContent = userPrompt;
-  if (opts.assetPath) {
-    const fwdPath = opts.assetPath.replace(/\\/g, '/');
+  if (opts.assetDict && Object.keys(opts.assetDict).length > 0) {
+    const listing = Object.entries(opts.assetDict)
+      .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
+      .join(',\n');
     userContent =
-      `[ASSET PRE-DOWNLOADED: ASSET_PATH = '${fwdPath}', format: ${opts.assetFormat ?? 'obj'}]\n` +
+      `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
       userPrompt;
   }
   messages.push({ role: 'user', content: userContent });
@@ -311,4 +323,4 @@ async function getCopilotCode(userPrompt, history = []) {
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, getCopilotResponse, planAssetDownload, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponse, planAssets, discoverModel, resetModelCache };

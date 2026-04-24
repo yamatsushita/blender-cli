@@ -1,30 +1,42 @@
-'use strict';
+﻿'use strict';
 
 /**
- * 3D asset resolver — finds and downloads free 3D models for use in Blender.
+ * Asset library -- downloads and caches 3D models and textures.
  *
- * Resolution order:
- *   1. Built-in registry  — well-known models (Stanford, Utah teapot, etc.)
- *   2. Poly Haven API     — free CC0 architectural / nature models
+ * Folder structure (rooted at ASSET_ROOT):
+ *   ASSET_ROOT/
+ *     models/    -- OBJ / GLTF mesh files
+ *     textures/  -- PNG / JPG texture maps
  *
- * Downloaded files are cached in ~/.blender-copilot/models/ and reused.
+ * ASSET_ROOT defaults to ~/.blender-copilot/assets/
+ * Override with env var BLENDER_ASSET_PATH.
+ *
+ * Sources:
+ *   1. Built-in registry  -- well-known free models (Utah teapot, Stanford meshes...)
+ *   2. Poly Haven API     -- CC0 models (polyhaven.com/models) + textures (polyhaven.com/textures)
  */
 
-const fs   = require('fs');
-const path = require('path');
-const os   = require('os');
+const fs    = require('fs');
+const path  = require('path');
+const os    = require('os');
 const https = require('https');
 const http  = require('http');
 const { URL } = require('url');
 
-const MODELS_CACHE = path.join(os.homedir(), '.blender-copilot', 'models');
-fs.mkdirSync(MODELS_CACHE, { recursive: true });
+const ASSET_ROOT = process.env.BLENDER_ASSET_PATH
+  ?? path.join(os.homedir(), '.blender-copilot', 'assets');
+
+const MODELS_DIR   = path.join(ASSET_ROOT, 'models');
+const TEXTURES_DIR = path.join(ASSET_ROOT, 'textures');
+
+fs.mkdirSync(MODELS_DIR,   { recursive: true });
+fs.mkdirSync(TEXTURES_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
-// Built-in registry of well-known free 3D models
+// Built-in registry
 // ---------------------------------------------------------------------------
 
-const KNOWN_MODELS = [
+const MODEL_REGISTRY = [
   {
     keywords: ['utah teapot', 'stanford teapot', 'newell teapot', 'teapot'],
     url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/teapot.obj',
@@ -63,10 +75,9 @@ const KNOWN_MODELS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Helpers
+// HTTP helpers
 // ---------------------------------------------------------------------------
 
-/** GET a URL and return { statusCode, body }. */
 function httpsGet(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'blender-cli/2.0' } }, (res) => {
@@ -75,16 +86,14 @@ function httpsGet(url) {
       res.on('end', () => resolve({ statusCode: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
     req.on('error', reject);
-    req.setTimeout(15_000, () => req.destroy(new Error('Timeout')));
+    req.setTimeout(20_000, () => req.destroy(new Error('Request timed out')));
   });
 }
 
-/** Download a URL to localPath, following redirects. */
 function downloadFile(url, localPath) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(localPath);
-    const parsed = new URL(url);
-    const lib = parsed.protocol === 'https:' ? https : http;
+    const lib = new URL(url).protocol === 'https:' ? https : http;
     const req = lib.get(url, { headers: { 'User-Agent': 'blender-cli/2.0' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
@@ -94,103 +103,147 @@ function downloadFile(url, localPath) {
       if (res.statusCode !== 200) {
         file.close();
         fs.unlink(localPath, () => {});
-        return reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       }
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve(localPath)));
       file.on('error', (e) => { file.close(); fs.unlink(localPath, () => {}); reject(e); });
     });
     req.on('error', (e) => { file.close(); fs.unlink(localPath, () => {}); reject(e); });
-    req.setTimeout(60_000, () => req.destroy(new Error('Download timed out')));
+    req.setTimeout(120_000, () => req.destroy(new Error('Download timed out')));
   });
 }
 
 // ---------------------------------------------------------------------------
-// Poly Haven API
+// Poly Haven
 // ---------------------------------------------------------------------------
 
-/** Search Poly Haven 3D models and return the best matching asset, or null. */
-async function searchPolyHaven(query) {
+async function searchPolyHaven(query, category) {
   try {
-    const { statusCode, body } = await httpsGet('https://api.polyhaven.com/assets?t=models');
+    const { statusCode, body } = await httpsGet(
+      `https://api.polyhaven.com/assets?t=${category}`,
+    );
     if (statusCode !== 200) return null;
     const assets = JSON.parse(body);
     const words = query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/);
     let best = null, bestScore = 0;
     for (const [id, info] of Object.entries(assets)) {
-      const name = (id + ' ' + (info.name ?? '')).toLowerCase();
-      const score = words.filter((w) => name.includes(w)).length;
+      const text = (id + ' ' + (info.name ?? '')).toLowerCase();
+      const score = words.filter((w) => text.includes(w)).length;
       if (score > bestScore) { bestScore = score; best = { id, ...info }; }
     }
     return bestScore > 0 ? best : null;
   } catch { return null; }
 }
 
-/** Get the best download URL for a Poly Haven asset. */
-async function getPolyHavenDownloadInfo(assetId) {
+async function getPolyHavenFiles(assetId) {
   try {
     const { statusCode, body } = await httpsGet(`https://api.polyhaven.com/files/${assetId}`);
     if (statusCode !== 200) return null;
-    const files = JSON.parse(body);
-    const gltfUrl = files?.gltf?.['1k']?.gltf?.url ?? files?.gltf?.['2k']?.gltf?.url;
-    if (gltfUrl) return { url: gltfUrl, format: 'gltf', name: assetId };
-    const objUrl = files?.obj?.['1k']?.obj?.url ?? files?.obj?.['2k']?.obj?.url;
-    if (objUrl) return { url: objUrl, format: 'obj', name: assetId };
-    return null;
+    return JSON.parse(body);
   } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Model resolver
 // ---------------------------------------------------------------------------
 
-/**
- * Try to find and download a 3D asset matching `query`.
- *
- * @param {string} query  Natural-language name, e.g. "stanford teapot"
- * @param {(msg: string) => void} [log]  Progress callback
- * @returns {Promise<{path: string, format: string, name: string, source: string}|null>}
- */
-async function resolveAsset(query, log = () => {}) {
+async function resolveModel(query, log = () => {}) {
   const q = query.toLowerCase();
 
   // 1. Built-in registry
-  const known = KNOWN_MODELS.find((m) => m.keywords.some((k) => q.includes(k)));
-  if (known) {
-    const localPath = path.join(MODELS_CACHE, `${known.name}.${known.format}`);
-    if (fs.existsSync(localPath)) {
-      log(`Using cached model: ${known.name}.${known.format}`);
-    } else {
-      log(`Downloading ${known.name}.${known.format} from registry…`);
-      await downloadFile(known.url, localPath);
-      const size = Math.round(fs.statSync(localPath).size / 1024);
-      log(`Downloaded ${known.name}.${known.format} (${size} KB)`);
+  const entry = MODEL_REGISTRY.find((m) => m.keywords.some((k) => q.includes(k)));
+  if (entry) {
+    const localPath = path.join(MODELS_DIR, `${entry.name}.${entry.format}`);
+    if (!fs.existsSync(localPath)) {
+      log(`Downloading model: ${entry.name}.${entry.format}...`);
+      await downloadFile(entry.url, localPath);
     }
-    return { path: localPath, format: known.format, name: known.name, source: 'registry' };
+    log(`Model ready: models/${entry.name}.${entry.format}`);
+    return { absPath: localPath, format: entry.format, name: entry.name };
   }
 
-  // 2. Poly Haven
-  log(`Searching Poly Haven for "${query}"…`);
-  const phAsset = await searchPolyHaven(query);
+  // 2. Poly Haven models
+  log(`Searching Poly Haven models for "${query}"...`);
+  const phAsset = await searchPolyHaven(query, 'models');
   if (phAsset) {
-    log(`Found on Poly Haven: ${phAsset.id}`);
-    const dlInfo = await getPolyHavenDownloadInfo(phAsset.id);
-    if (dlInfo) {
-      const localPath = path.join(MODELS_CACHE, `${dlInfo.name}.${dlInfo.format}`);
-      if (fs.existsSync(localPath)) {
-        log(`Using cached model: ${dlInfo.name}.${dlInfo.format}`);
-      } else {
-        log(`Downloading ${dlInfo.name}.${dlInfo.format}…`);
-        await downloadFile(dlInfo.url, localPath);
-        const size = Math.round(fs.statSync(localPath).size / 1024);
-        log(`Downloaded ${dlInfo.name}.${dlInfo.format} (${size} KB)`);
+    const files = await getPolyHavenFiles(phAsset.id);
+    const gltfUrl = files?.gltf?.['1k']?.gltf?.url ?? files?.gltf?.['2k']?.gltf?.url;
+    const objUrl  = files?.obj?.['1k']?.obj?.url   ?? files?.obj?.['2k']?.obj?.url;
+    const dlUrl = gltfUrl ?? objUrl;
+    const fmt   = gltfUrl ? 'gltf' : 'obj';
+    if (dlUrl) {
+      const localPath = path.join(MODELS_DIR, `${phAsset.id}.${fmt}`);
+      if (!fs.existsSync(localPath)) {
+        log(`Downloading model: ${phAsset.id}.${fmt}...`);
+        await downloadFile(dlUrl, localPath);
       }
-      return { path: localPath, format: dlInfo.format, name: dlInfo.name, source: 'polyhaven' };
+      log(`Model ready: models/${phAsset.id}.${fmt}`);
+      return { absPath: localPath, format: fmt, name: phAsset.id };
     }
   }
 
-  log(`No downloadable asset found for "${query}"`);
+  log(`No model found for "${query}"`);
   return null;
 }
 
-module.exports = { resolveAsset };
+// ---------------------------------------------------------------------------
+// Texture resolver
+// ---------------------------------------------------------------------------
+
+async function resolveTexture(query, log = () => {}) {
+  log(`Searching Poly Haven textures for "${query}"...`);
+  const phAsset = await searchPolyHaven(query, 'textures');
+  if (!phAsset) { log(`No texture found for "${query}"`); return null; }
+
+  const files = await getPolyHavenFiles(phAsset.id);
+  if (!files) return null;
+
+  const diffuse = files['Diffuse'] ?? files['diffuse'] ?? files['albedo'] ?? files['Color'];
+  if (!diffuse) { log(`No diffuse channel for "${phAsset.id}"`); return null; }
+
+  const res1k = diffuse['1k'] ?? diffuse['2k'];
+  if (!res1k) return null;
+  const imgInfo = res1k['jpg'] ?? res1k['png'];
+  if (!imgInfo?.url) return null;
+
+  const ext = imgInfo.url.endsWith('.png') ? 'png' : 'jpg';
+  const localPath = path.join(TEXTURES_DIR, `${phAsset.id}_diff_1k.${ext}`);
+  if (!fs.existsSync(localPath)) {
+    log(`Downloading texture: ${phAsset.id}_diff_1k.${ext}...`);
+    await downloadFile(imgInfo.url, localPath);
+  }
+  log(`Texture ready: textures/${phAsset.id}_diff_1k.${ext}`);
+  return { absPath: localPath, name: phAsset.id };
+}
+
+// ---------------------------------------------------------------------------
+// Batch downloader
+// ---------------------------------------------------------------------------
+
+/**
+ * Download all requested assets and return a {key: absPath} mapping.
+ *
+ * @param {Array<{type: 'model'|'texture', query: string, key: string}>} assetList
+ * @param {(msg: string) => void} [log]
+ * @returns {Promise<Record<string, string>>}  key -> absolute path
+ */
+async function downloadAssets(assetList, log = () => {}) {
+  const result = {};
+  for (const item of assetList) {
+    try {
+      if (item.type === 'model') {
+        const r = await resolveModel(item.query, log);
+        if (r) result[item.key] = r.absPath;
+      } else if (item.type === 'texture') {
+        const r = await resolveTexture(item.query, log);
+        if (r) result[item.key] = r.absPath;
+      }
+    } catch (err) {
+      log(`Warning: failed to download "${item.query}": ${err.message}`);
+    }
+  }
+  return result;
+}
+
+module.exports = { ASSET_ROOT, downloadAssets, resolveModel, resolveTexture };
