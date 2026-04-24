@@ -227,7 +227,14 @@ async function main() {
 
     const spin2 = spinner('Updating Blender scene…');
     try {
-      const result = await executeInBlender(code, blenderPaths);
+      // Prepend ASSET_PATH as a real Python variable if an asset was downloaded.
+      let execCode = code;
+      if (assetOpts.assetPath) {
+        // Use raw string with backslashes escaped so Windows paths work.
+        const escaped = assetOpts.assetPath.replace(/\\/g, '\\\\');
+        execCode = `ASSET_PATH = '${escaped}'\n` + code;
+      }
+      const result = await executeInBlender(execCode, blenderPaths);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated'));
         history.push({ prompt: line, code });
