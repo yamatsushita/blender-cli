@@ -68,7 +68,7 @@ $ blender-cli
 
 1. You type a **natural language prompt** in the terminal.
 2. Copilot is asked whether any 3D models or textures need to be downloaded.
-3. Assets are fetched from the **built-in registry** (Stanford meshes, Utah teapot…) or **Poly Haven** (CC0 textures and models) and cached locally.
+3. Assets are fetched from the **built-in registry** (Stanford meshes, Utah teapot…), **Poly Haven** (CC0 models, textures, HDRIs, .blend files), or **ambientCG** (CC0 PBR textures) and cached locally.
 4. Copilot generates Python `bpy` code with `ASSET_PATH`, `ASSETS`, `os`, and `math` pre-injected.
 5. The code is sent to Blender via the file bridge and executed on Blender's main thread.
 
@@ -140,6 +140,8 @@ ENV VARS
   ASSET_PATH    Asset library root folder (default: ~/.blender-copilot/assets/)
                   models/    ← downloaded OBJ/GLTF meshes
                   textures/  ← downloaded PNG/JPG texture maps
+                  hdris/     ← downloaded EXR/HDR environment maps
+                  blends/    ← downloaded native .blend files
 ```
 
 ### Always-available Python variables
@@ -147,11 +149,14 @@ ENV VARS
 Every generated code block has these pre-injected before execution:
 
 ```python
-import os, math
-ASSET_PATH = '/Users/you/.blender-copilot/assets'   # root folder
-ASSETS = {                                            # files for this request
+import os, math, mathutils
+ASSET_DIR = '/Users/you/.blender-copilot/assets'   # root folder (use for path building only)
+ASSET_PATH = ASSET_DIR                              # backward-compat alias
+ASSETS = {                                          # files for this request
     'armadillo_model': '.../models/armadillo.obj',
     'wood_texture':    '.../textures/wood_floor_diff_1k.jpg',
+    'sky_hdri':        '.../hdris/sunny_sky_1k.exr',
+    'chair_blend':     '.../blends/chair.blend',
 }
 ```
 
@@ -159,11 +164,16 @@ ASSETS = {                                            # files for this request
 
 ### Asset sources
 
-| Source | Coverage |
-|--------|----------|
-| Built-in registry | Stanford armadillo, bunny, dragon, lucy; Utah/Stanford teapot; Spot (cow) |
-| [Poly Haven](https://polyhaven.com/models) | 100s of CC0 models (architecture, nature, props) |
-| [Poly Haven textures](https://polyhaven.com/textures) | 700+ CC0 PBR textures (wood, brick, concrete, marble…) |
+| Source | Asset types | Coverage |
+|--------|------------|----------|
+| Built-in registry | Models | Stanford armadillo, bunny, dragon, lucy; Utah/Stanford teapot; Spot (cow) |
+| [Poly Haven](https://polyhaven.com/models) | Models | 100s of CC0 models (architecture, nature, props) |
+| [Poly Haven](https://polyhaven.com/textures) | Textures | 700+ CC0 PBR textures (wood, brick, concrete, marble…) |
+| [Poly Haven](https://polyhaven.com/hdris) | HDRIs | 700+ CC0 EXR environment maps (sky, indoor, studio, forest…) |
+| [Poly Haven](https://polyhaven.com/models) | .blend files | Native Blender scene files with materials+rigging intact |
+| [ambientCG](https://ambientcg.com) | Textures (fallback) | 1000+ CC0 PBR texture sets (zip download, auto-extracted) |
+
+All sources are **completely free and CC0-licensed** (no attribution required).
 
 ### REPL commands
 
@@ -229,7 +239,7 @@ blender-cli/
     └── src/
         ├── index.js          # Interactive REPL, spinner, asset orchestration
         ├── copilot.js        # GitHub Copilot Chat API client + planAssets()
-        ├── assets.js         # Model + texture download/cache (registry + Poly Haven)
+        ├── assets.js         # Model/texture/HDRI/blend download & cache (registry + Poly Haven + ambientCG)
         └── blender.js        # File-based bridge + Blender auto-launch
 ```
 

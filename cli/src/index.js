@@ -87,6 +87,8 @@ ${fmt(c.bold, 'EXAMPLE PROMPTS')}
   set the world background to dark navy blue
   add a three-point lighting setup for product rendering
   apply a glossy red material to every mesh in the scene
+  put a Stanford bunny on a table. Download the 3D .obj if necessary.
+  create an outdoor scene with a sunny sky HDRI and marble floor texture
 `);
 }
 

@@ -41,16 +41,18 @@ considerations (e.g. how to use pre-downloaded assets, complex node setups, cont
 
 ALWAYS-AVAILABLE VARIABLES (injected into every execution):
 - ASSET_DIR : str  -- absolute path to the root asset library DIRECTORY (not a file!).
-    Contains subfolders: models/ (OBJ/GLTF meshes) and textures/ (PNG/JPG maps).
-    Use ONLY for building paths manually: os.path.join(ASSET_DIR, 'models', 'file.obj')
-    *** NEVER pass ASSET_DIR directly as a filepath to obj_import or any import operator ***
+    Subfolders: models/ (OBJ/GLTF), textures/ (PNG/JPG), hdris/ (EXR/HDR), blends/ (.blend).
+    Use ONLY for building paths: os.path.join(ASSET_DIR, 'models', 'file.obj')
+    *** NEVER pass ASSET_DIR directly as a filepath to any import operator ***
 - ASSETS : dict    -- pre-downloaded files for THIS request, mapping a descriptive
     key (str) to an absolute file path (str).
     Example: ASSETS = {'bunny_model': '/path/assets/models/stanford_bunny.obj',
-                        'wood_texture': '/path/assets/textures/wood_floor_diff_1k.jpg'}
+                        'wood_texture': '/path/assets/textures/wood_floor_diff_1k.jpg',
+                        'sky_hdri': '/path/assets/hdris/sky_1k.exr',
+                        'chair_blend': '/path/assets/blends/chair.blend'}
     Use ASSETS.get('key') to safely access. ASSETS may be empty if nothing was downloaded.
 - ASSET_PATH : str -- same as ASSET_DIR (backward-compat alias). Treat identically.
-- os, math, mathutils are pre-imported — do NOT import them again.
+- os, math, mathutils are pre-imported -- do NOT import them again.
 
 IMPORTING ASSETS -- use ASSETS['key'] for the file path, never ASSET_DIR:
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder, not a file!
@@ -206,7 +208,7 @@ function parseResponse(raw) {
  * Ask Copilot to list all 3D assets (models + textures) needed for the prompt.
  * Returns an array of {type, query, key} items to pass to downloadAssets().
  * @param {string} userPrompt
- * @returns {Promise<Array<{type: 'model'|'texture', query: string, key: string}>>}
+ * @returns {Promise<Array<{type: 'model'|'texture'|'hdri'|'blend', query: string, key: string}>>}
  */
 async function planAssets(userPrompt) {
   const token = getGitHubToken();
@@ -218,23 +220,27 @@ async function planAssets(userPrompt) {
       content:
         'You are a 3D asset detector. Analyze the Blender scene request and respond ONLY with valid JSON ' +
         '(no markdown, no prose).\n' +
-        'Format: {"assets": [{"type": "model"|"texture", "query": "<search term>", "key": "<snake_case_id>"}]}\n\n' +
-        'Rules:\n' +
-        '- Include type="model" for any specific named 3D mesh or scan that is NOT a Blender primitive.\n' +
-        '  This includes: Stanford meshes (armadillo, bunny, dragon, lucy, buddha, happy buddha,\n' +
-        '  xyzrgb dragon), Utah/Stanford/Newell teapot, spot (cow model), any named real-world scan,\n' +
-        '  or any 3D object the user describes as needing a download / .obj / .gltf file.\n' +
-        '  Also include if the user references a URL that points to a 3D scan image or dataset.\n' +
-        '  query: use the canonical name (e.g. "stanford armadillo", "utah teapot", "stanford bunny").\n' +
-        '- Include type="texture" for specific real-world surface textures (e.g. "oak wood floor",\n' +
-        '  "brick wall", "marble", "concrete"). Include when photo-realistic texture is clearly requested.\n' +
-        '- key: short snake_case identifier (e.g. "armadillo_model", "teapot_model", "wood_texture").\n' +
-        '- Do NOT include standard Blender primitives (cube, sphere, cylinder, torus, cone, monkey/Suzanne,\n' +
-        '  text, curve, light, camera) — Blender creates those natively.\n' +
+        'Format: {"assets": [{"type": "model"|"texture"|"hdri"|"blend", "query": "<search term>", "key": "<snake_case_id>"}]}\n\n' +
+        'Asset types:\n' +
+        '- type="model" : any specific named 3D mesh/scan NOT a Blender primitive.\n' +
+        '  Includes: Stanford meshes (armadillo, bunny, dragon, lucy, buddha),\n' +
+        '  Utah/Newell teapot, spot (cow), any named real-world scan, any .obj/.gltf request.\n' +
+        '  query: canonical name ("stanford armadillo", "utah teapot", "stanford bunny").\n' +
+        '- type="texture" : real-world PBR surface texture ("oak wood floor", "brick wall",\n' +
+        '  "marble", "concrete", "metal"). Use when photo-realistic surface is clearly needed.\n' +
+        '- type="hdri" : environment/sky/background lighting map. Use for outdoor scenes,\n' +
+        '  realistic sky, studio lighting, or when the user mentions sky/environment/HDRI/backdrop.\n' +
+        '  query: describe the environment ("sunny sky", "studio lighting", "forest", "sunset", "night city").\n' +
+        '- type="blend" : native .blend scene/object file. Use ONLY when user explicitly asks for a\n' +
+        '  Blender file or requests a complex pre-built 3D asset best served as a .blend.\n' +
+        '- key: short snake_case id ("armadillo_model", "wood_texture", "sky_hdri", "chair_blend").\n' +
+        '- Do NOT include Blender primitives (cube, sphere, cylinder, torus, cone, monkey/Suzanne).\n' +
         '- If nothing needs downloading, return {"assets": []}.\n\n' +
         'Examples:\n' +
-        '  "Create a scene with the Stanford armadillo" ->\n' +
-        '    {"assets": [{"type": "model", "query": "stanford armadillo", "key": "armadillo_model"}]}\n' +
+        '  "Stanford armadillo on a marble floor with sunny sky" ->\n' +
+        '    {"assets": [{"type": "model", "query": "stanford armadillo", "key": "armadillo_model"},\n' +
+        '                {"type": "texture", "query": "marble", "key": "marble_texture"},\n' +
+        '                {"type": "hdri", "query": "sunny sky", "key": "sky_hdri"}]}\n' +
         '  "Place a teapot and a bunny on a wood floor" ->\n' +
         '    {"assets": [{"type": "model", "query": "utah teapot", "key": "teapot_model"},\n' +
         '                {"type": "model", "query": "stanford bunny", "key": "bunny_model"},\n' +
@@ -244,7 +250,7 @@ async function planAssets(userPrompt) {
     { role: 'user', content: userPrompt },
   ];
 
-  const payload = JSON.stringify({ model, messages, max_tokens: 200, temperature: 0 });
+  const payload = JSON.stringify({ model, messages, max_tokens: 300, temperature: 0 });
   const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
 
   try {

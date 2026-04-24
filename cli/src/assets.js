@@ -1,19 +1,23 @@
-﻿'use strict';
+'use strict';
 
 /**
- * Asset library -- downloads and caches 3D models and textures.
+ * Asset library -- downloads and caches 3D models, textures, HDRIs, and Blender files.
  *
  * Folder structure (rooted at ASSET_ROOT):
  *   ASSET_ROOT/
  *     models/    -- OBJ / GLTF mesh files
- *     textures/  -- PNG / JPG texture maps
+ *     textures/  -- PNG / JPG PBR diffuse maps
+ *     hdris/     -- EXR / HDR environment maps
+ *     blends/    -- .blend Blender scene / object files
  *
  * ASSET_ROOT defaults to ~/.blender-copilot/assets/
- * Override with env var BLENDER_ASSET_PATH.
+ * Override with env var ASSET_PATH (or BLENDER_ASSET_PATH for backward compat).
  *
  * Sources:
- *   1. Built-in registry  -- well-known free models (Utah teapot, Stanford meshes...)
- *   2. Poly Haven API     -- CC0 models (polyhaven.com/models) + textures (polyhaven.com/textures)
+ *   Models   : Built-in registry (Stanford meshes, Utah teapot) -> Poly Haven
+ *   Textures : Poly Haven -> ambientCG (CC0 PBR materials, zip download)
+ *   HDRIs    : Poly Haven HDRIs (CC0, EXR 1k)
+ *   Blends   : Poly Haven models blend format
  */
 
 const fs    = require('fs');
@@ -22,21 +26,23 @@ const os    = require('os');
 const https = require('https');
 const http  = require('http');
 const { URL } = require('url');
+const { execSync } = require('child_process');
 
 // Accept either ASSET_PATH or BLENDER_ASSET_PATH as the env var name.
-// ASSET_PATH is the intuitive name; BLENDER_ASSET_PATH is kept for backward compat.
 const ASSET_ROOT = process.env.ASSET_PATH
   ?? process.env.BLENDER_ASSET_PATH
   ?? path.join(os.homedir(), '.blender-copilot', 'assets');
 
 const MODELS_DIR   = path.join(ASSET_ROOT, 'models');
 const TEXTURES_DIR = path.join(ASSET_ROOT, 'textures');
+const HDRIS_DIR    = path.join(ASSET_ROOT, 'hdris');
+const BLENDS_DIR   = path.join(ASSET_ROOT, 'blends');
 
-fs.mkdirSync(MODELS_DIR,   { recursive: true });
-fs.mkdirSync(TEXTURES_DIR, { recursive: true });
+for (const d of [MODELS_DIR, TEXTURES_DIR, HDRIS_DIR, BLENDS_DIR])
+  fs.mkdirSync(d, { recursive: true });
 
 // ---------------------------------------------------------------------------
-// Built-in registry
+// Built-in model registry
 // ---------------------------------------------------------------------------
 
 const MODEL_REGISTRY = [
@@ -56,12 +62,12 @@ const MODEL_REGISTRY = [
     format: 'obj', name: 'stanford_dragon',
   },
   {
-    keywords: ['armadillo'],
+    keywords: ['armadillo', 'stanford armadillo'],
     url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/armadillo.obj',
     format: 'obj', name: 'armadillo',
   },
   {
-    keywords: ['lucy'],
+    keywords: ['lucy', 'stanford lucy'],
     url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/lucy.obj',
     format: 'obj', name: 'lucy',
   },
@@ -74,6 +80,16 @@ const MODEL_REGISTRY = [
     keywords: ['cow'],
     url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/spot.obj',
     format: 'obj', name: 'spot_cow',
+  },
+  {
+    keywords: ['bob', 'bob mesh', 'blob'],
+    url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/bob.obj',
+    format: 'obj', name: 'bob',
+  },
+  {
+    keywords: ['fertility', 'vase'],
+    url: 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/fertility.obj',
+    format: 'obj', name: 'fertility',
   },
 ];
 
@@ -118,7 +134,7 @@ function downloadFile(url, localPath) {
 }
 
 // ---------------------------------------------------------------------------
-// Poly Haven
+// Poly Haven helpers
 // ---------------------------------------------------------------------------
 
 async function searchPolyHaven(query, category) {
@@ -131,7 +147,9 @@ async function searchPolyHaven(query, category) {
     const words = query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/);
     let best = null, bestScore = 0;
     for (const [id, info] of Object.entries(assets)) {
-      const text = (id + ' ' + (info.name ?? '')).toLowerCase();
+      const tagText = Array.isArray(info.tags) ? info.tags.join(' ') : '';
+      const catText = Array.isArray(info.categories) ? info.categories.join(' ') : '';
+      const text = (id + ' ' + (info.name ?? '') + ' ' + tagText + ' ' + catText).toLowerCase();
       const score = words.filter((w) => text.includes(w)).length;
       if (score > bestScore) { bestScore = score; best = { id, ...info }; }
     }
@@ -148,7 +166,43 @@ async function getPolyHavenFiles(assetId) {
 }
 
 // ---------------------------------------------------------------------------
-// Model resolver
+// ZIP extraction helper (for ambientCG)
+// ---------------------------------------------------------------------------
+
+function extractZip(zipPath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  if (process.platform === 'win32') {
+    execSync(
+      `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force"`,
+      { stdio: 'ignore' },
+    );
+  } else {
+    execSync(`unzip -o "${zipPath}" -d "${destDir}"`, { stdio: 'ignore' });
+  }
+}
+
+function findColorMapInDir(dir) {
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => /\.(jpg|jpeg|png)$/i.test(f)); }
+  catch { return null; }
+  for (const suffix of ['Color', 'Albedo', 'Diffuse', 'col', 'diff']) {
+    const f = files.find((n) => n.toLowerCase().includes(suffix.toLowerCase()));
+    if (f) return path.join(dir, f);
+  }
+  return files.length > 0 ? path.join(dir, files[0]) : null;
+}
+
+function cleanup(targets) {
+  for (const t of targets) {
+    try {
+      if (fs.statSync(t).isDirectory()) fs.rmSync(t, { recursive: true, force: true });
+      else fs.unlinkSync(t);
+    } catch (_) {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Model resolver (Built-in registry -> Poly Haven)
 // ---------------------------------------------------------------------------
 
 async function resolveModel(query, log = () => {}) {
@@ -159,7 +213,7 @@ async function resolveModel(query, log = () => {}) {
   if (entry) {
     const localPath = path.join(MODELS_DIR, `${entry.name}.${entry.format}`);
     if (!fs.existsSync(localPath)) {
-      log(`Downloading model: ${entry.name}.${entry.format}...`);
+      log(`Downloading model from registry: ${entry.name}.${entry.format}...`);
       await downloadFile(entry.url, localPath);
     }
     log(`Model ready: models/${entry.name}.${entry.format}`);
@@ -191,32 +245,145 @@ async function resolveModel(query, log = () => {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Texture resolver
+// Texture resolver (Poly Haven -> ambientCG fallback)
 // ---------------------------------------------------------------------------
 
 async function resolveTexture(query, log = () => {}) {
+  // 1. Poly Haven textures
   log(`Searching Poly Haven textures for "${query}"...`);
   const phAsset = await searchPolyHaven(query, 'textures');
-  if (!phAsset) { log(`No texture found for "${query}"`); return null; }
+  if (phAsset) {
+    const files = await getPolyHavenFiles(phAsset.id);
+    if (files) {
+      const diffuse = files['Diffuse'] ?? files['diffuse'] ?? files['albedo'] ?? files['Color'];
+      if (diffuse) {
+        const res1k = diffuse['1k'] ?? diffuse['2k'];
+        const imgInfo = res1k?.['jpg'] ?? res1k?.['png'];
+        if (imgInfo?.url) {
+          const ext = imgInfo.url.endsWith('.png') ? 'png' : 'jpg';
+          const localPath = path.join(TEXTURES_DIR, `${phAsset.id}_diff_1k.${ext}`);
+          if (!fs.existsSync(localPath)) {
+            log(`Downloading texture: ${phAsset.id}_diff_1k.${ext}...`);
+            await downloadFile(imgInfo.url, localPath);
+          }
+          log(`Texture ready: textures/${phAsset.id}_diff_1k.${ext}`);
+          return { absPath: localPath, name: phAsset.id };
+        }
+      }
+    }
+  }
+
+  // 2. ambientCG fallback (CC0 PBR materials)
+  log(`Searching ambientCG for "${query}"...`);
+  try {
+    const searchUrl = `https://ambientcg.com/api/v2/full_json?q=${encodeURIComponent(query)}&limit=5&sort=Popular`;
+    const { statusCode, body } = await httpsGet(searchUrl);
+    if (statusCode === 200) {
+      const data = JSON.parse(body);
+      const asset = data.foundAssets?.[0];
+      if (asset) {
+        const assetId = asset.assetId;
+        const localPath = path.join(TEXTURES_DIR, `${assetId}_1K_Color.jpg`);
+        if (fs.existsSync(localPath)) {
+          log(`Texture ready (cached): textures/${path.basename(localPath)}`);
+          return { absPath: localPath, name: assetId };
+        }
+        const zipPath  = path.join(TEXTURES_DIR, `_tmp_${assetId}.zip`);
+        const extractDir = path.join(TEXTURES_DIR, `_extract_${assetId}`);
+        let downloaded = false;
+        for (const res of ['1K', '2K']) {
+          const zipUrl = `https://ambientcg.com/get?file=${assetId}_${res}-JPG.zip`;
+          try { await downloadFile(zipUrl, zipPath); downloaded = true; break; } catch (_) {}
+        }
+        if (downloaded) {
+          try {
+            extractZip(zipPath, extractDir);
+            const colorFile = findColorMapInDir(extractDir);
+            if (colorFile) {
+              fs.copyFileSync(colorFile, localPath);
+              cleanup([zipPath, extractDir]);
+              log(`Texture ready (ambientCG): textures/${path.basename(localPath)}`);
+              return { absPath: localPath, name: assetId };
+            }
+          } catch (e) {
+            log(`Warning: could not extract ambientCG zip (is "unzip" installed?)`);
+          }
+          cleanup([zipPath, extractDir]);
+        }
+      }
+    }
+  } catch (_) {}
+
+  log(`No texture found for "${query}"`);
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// HDRI resolver (Poly Haven HDRIs -> EXR 1k)
+// ---------------------------------------------------------------------------
+
+/**
+ * Download a Poly Haven HDRI environment map (EXR 1k).
+ * @param {string} query
+ * @param {(msg: string) => void} [log]
+ * @returns {Promise<{absPath: string, name: string}|null>}
+ */
+async function resolveHDRI(query, log = () => {}) {
+  log(`Searching Poly Haven HDRIs for "${query}"...`);
+  const phAsset = await searchPolyHaven(query, 'hdris');
+  if (!phAsset) { log(`No HDRI found for "${query}"`); return null; }
 
   const files = await getPolyHavenFiles(phAsset.id);
   if (!files) return null;
 
-  const diffuse = files['Diffuse'] ?? files['diffuse'] ?? files['albedo'] ?? files['Color'];
-  if (!diffuse) { log(`No diffuse channel for "${phAsset.id}"`); return null; }
+  // HDRI files: files.hdri['1k'].exr.url or files.hdri['1k'].hdr.url
+  const hdriSection = files.hdri ?? files;
+  const res1k = hdriSection['1k'] ?? hdriSection['2k'];
+  if (!res1k) { log(`No 1k/2k resolution for HDRI "${phAsset.id}"`); return null; }
 
-  const res1k = diffuse['1k'] ?? diffuse['2k'];
-  if (!res1k) return null;
-  const imgInfo = res1k['jpg'] ?? res1k['png'];
-  if (!imgInfo?.url) return null;
+  // Prefer EXR (better precision), fall back to HDR
+  const fileInfo = res1k.exr ?? res1k.hdr;
+  if (!fileInfo?.url) return null;
 
-  const ext = imgInfo.url.endsWith('.png') ? 'png' : 'jpg';
-  const localPath = path.join(TEXTURES_DIR, `${phAsset.id}_diff_1k.${ext}`);
+  const ext = res1k.exr ? 'exr' : 'hdr';
+  const localPath = path.join(HDRIS_DIR, `${phAsset.id}_1k.${ext}`);
   if (!fs.existsSync(localPath)) {
-    log(`Downloading texture: ${phAsset.id}_diff_1k.${ext}...`);
-    await downloadFile(imgInfo.url, localPath);
+    log(`Downloading HDRI: ${phAsset.id}_1k.${ext}...`);
+    await downloadFile(fileInfo.url, localPath);
   }
-  log(`Texture ready: textures/${phAsset.id}_diff_1k.${ext}`);
+  log(`HDRI ready: hdris/${phAsset.id}_1k.${ext}`);
+  return { absPath: localPath, name: phAsset.id };
+}
+
+// ---------------------------------------------------------------------------
+// Blend file resolver (Poly Haven model .blend format)
+// ---------------------------------------------------------------------------
+
+/**
+ * Download a Poly Haven asset as a native .blend file.
+ * Falls back to null if no .blend format is available.
+ * @param {string} query
+ * @param {(msg: string) => void} [log]
+ * @returns {Promise<{absPath: string, name: string}|null>}
+ */
+async function resolveBlend(query, log = () => {}) {
+  log(`Searching Poly Haven for .blend file: "${query}"...`);
+  const phAsset = await searchPolyHaven(query, 'models');
+  if (!phAsset) { log(`No Poly Haven model found for "${query}"`); return null; }
+
+  const files = await getPolyHavenFiles(phAsset.id);
+  if (!files) return null;
+
+  // Poly Haven blend format: files.blend['1k'].blend.url
+  const blendUrl = files?.blend?.['1k']?.blend?.url ?? files?.blend?.['2k']?.blend?.url;
+  if (!blendUrl) { log(`No .blend format available for "${phAsset.id}"`); return null; }
+
+  const localPath = path.join(BLENDS_DIR, `${phAsset.id}.blend`);
+  if (!fs.existsSync(localPath)) {
+    log(`Downloading .blend: ${phAsset.id}.blend...`);
+    await downloadFile(blendUrl, localPath);
+  }
+  log(`.blend ready: blends/${phAsset.id}.blend`);
   return { absPath: localPath, name: phAsset.id };
 }
 
@@ -227,7 +394,7 @@ async function resolveTexture(query, log = () => {}) {
 /**
  * Download all requested assets and return a {key: absPath} mapping.
  *
- * @param {Array<{type: 'model'|'texture', query: string, key: string}>} assetList
+ * @param {Array<{type: 'model'|'texture'|'hdri'|'blend', query: string, key: string}>} assetList
  * @param {(msg: string) => void} [log]
  * @returns {Promise<Record<string, string>>}  key -> absolute path
  */
@@ -235,13 +402,12 @@ async function downloadAssets(assetList, log = () => {}) {
   const result = {};
   for (const item of assetList) {
     try {
-      if (item.type === 'model') {
-        const r = await resolveModel(item.query, log);
-        if (r) result[item.key] = r.absPath;
-      } else if (item.type === 'texture') {
-        const r = await resolveTexture(item.query, log);
-        if (r) result[item.key] = r.absPath;
-      }
+      let r = null;
+      if      (item.type === 'model')   r = await resolveModel(item.query, log);
+      else if (item.type === 'texture') r = await resolveTexture(item.query, log);
+      else if (item.type === 'hdri')    r = await resolveHDRI(item.query, log);
+      else if (item.type === 'blend')   r = await resolveBlend(item.query, log);
+      if (r) result[item.key] = r.absPath;
     } catch (err) {
       log(`Warning: failed to download "${item.query}": ${err.message}`);
     }
@@ -249,4 +415,9 @@ async function downloadAssets(assetList, log = () => {}) {
   return result;
 }
 
-module.exports = { ASSET_ROOT, downloadAssets, resolveModel, resolveTexture };
+module.exports = {
+  ASSET_ROOT,
+  MODELS_DIR, TEXTURES_DIR, HDRIS_DIR, BLENDS_DIR,
+  downloadAssets,
+  resolveModel, resolveTexture, resolveHDRI, resolveBlend,
+};
