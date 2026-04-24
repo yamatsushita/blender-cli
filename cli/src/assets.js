@@ -23,7 +23,10 @@ const https = require('https');
 const http  = require('http');
 const { URL } = require('url');
 
-const ASSET_ROOT = process.env.BLENDER_ASSET_PATH
+// Accept either ASSET_PATH or BLENDER_ASSET_PATH as the env var name.
+// ASSET_PATH is the intuitive name; BLENDER_ASSET_PATH is kept for backward compat.
+const ASSET_ROOT = process.env.ASSET_PATH
+  ?? process.env.BLENDER_ASSET_PATH
   ?? path.join(os.homedir(), '.blender-copilot', 'assets');
 
 const MODELS_DIR   = path.join(ASSET_ROOT, 'models');

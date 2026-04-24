@@ -217,13 +217,26 @@ async function planAssets(userPrompt) {
         '(no markdown, no prose).\n' +
         'Format: {"assets": [{"type": "model"|"texture", "query": "<search term>", "key": "<snake_case_id>"}]}\n\n' +
         'Rules:\n' +
-        '- Include an asset ONLY if it is a specific named/real-world file not built into Blender.\n' +
-        '- type="model": named 3D meshes (e.g. "stanford teapot", "stanford bunny", "utah teapot").\n' +
-        '- type="texture": specific real-world surface textures (e.g. "oak wood floor", "brick wall",\n' +
-        '  "marble", "concrete"). Include when the user explicitly asks for a photo-realistic texture.\n' +
-        '- key: short snake_case identifier used in ASSETS dict (e.g. "teapot_model", "wood_texture").\n' +
-        '- Do NOT include anything Blender creates natively (cube, sphere, monkey, light, camera, etc.).\n' +
-        '- If nothing needs downloading, return {"assets": []}.',
+        '- Include type="model" for any specific named 3D mesh or scan that is NOT a Blender primitive.\n' +
+        '  This includes: Stanford meshes (armadillo, bunny, dragon, lucy, buddha, happy buddha,\n' +
+        '  xyzrgb dragon), Utah/Stanford/Newell teapot, spot (cow model), any named real-world scan,\n' +
+        '  or any 3D object the user describes as needing a download / .obj / .gltf file.\n' +
+        '  Also include if the user references a URL that points to a 3D scan image or dataset.\n' +
+        '  query: use the canonical name (e.g. "stanford armadillo", "utah teapot", "stanford bunny").\n' +
+        '- Include type="texture" for specific real-world surface textures (e.g. "oak wood floor",\n' +
+        '  "brick wall", "marble", "concrete"). Include when photo-realistic texture is clearly requested.\n' +
+        '- key: short snake_case identifier (e.g. "armadillo_model", "teapot_model", "wood_texture").\n' +
+        '- Do NOT include standard Blender primitives (cube, sphere, cylinder, torus, cone, monkey/Suzanne,\n' +
+        '  text, curve, light, camera) — Blender creates those natively.\n' +
+        '- If nothing needs downloading, return {"assets": []}.\n\n' +
+        'Examples:\n' +
+        '  "Create a scene with the Stanford armadillo" ->\n' +
+        '    {"assets": [{"type": "model", "query": "stanford armadillo", "key": "armadillo_model"}]}\n' +
+        '  "Place a teapot and a bunny on a wood floor" ->\n' +
+        '    {"assets": [{"type": "model", "query": "utah teapot", "key": "teapot_model"},\n' +
+        '                {"type": "model", "query": "stanford bunny", "key": "bunny_model"},\n' +
+        '                {"type": "texture", "query": "wood floor", "key": "wood_texture"}]}\n' +
+        '  "Add a red cube" -> {"assets": []}',
     },
     { role: 'user', content: userPrompt },
   ];

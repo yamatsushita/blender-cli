@@ -68,10 +68,10 @@ ${fmt(c.bold, 'OPTIONS')}
   --help       Show this help
 
 ${fmt(c.bold, 'ENV VARS')}
-  BLENDER_PATH        Full path to the Blender executable (if not auto-detected)
-  BLENDER_ASSET_PATH  Asset library folder (default: ~/.blender-copilot/assets/)
-                      Models stored in <ASSET_PATH>/models/
-                      Textures stored in <ASSET_PATH>/textures/
+  BLENDER_PATH  Full path to the Blender executable (if not auto-detected)
+  ASSET_PATH    Asset library folder (default: ~/.blender-copilot/assets/)
+                Models stored in <ASSET_PATH>/models/
+                Textures stored in <ASSET_PATH>/textures/
 
 ${fmt(c.bold, 'REPL COMMANDS')}
   /undo        Undo the last operation in Blender
@@ -103,7 +103,7 @@ async function main() {
   console.log(`\n${fmt(c.bold + c.cyan, '🎨 Blender CLI')}`);
   console.log(fmt(c.dim, 'Type a natural language prompt, /help for commands, or Ctrl+C to quit.\n'));
   console.log(fmt(c.dim, `  Asset library: ${ASSET_ROOT}`));
-  console.log(fmt(c.dim, `  (Override with env: BLENDER_ASSET_PATH)\n`));
+  console.log(fmt(c.dim, `  (Override with env: ASSET_PATH)\n`));
 
   // ── Blender auto-launch ────────────────────────────────────────────────
   // sessionPaths is set when Blender is launched by this CLI invocation.
