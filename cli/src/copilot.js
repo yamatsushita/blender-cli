@@ -147,18 +147,27 @@ ALWAYS-AVAILABLE VARIABLES (injected into every execution):
                         'wood_texture': '/path/assets/textures/wood_floor_diff_1k.jpg',
                         'sky_hdri': '/path/assets/hdris/sky_1k.exr',
                         'chair_blend': '/path/assets/blends/chair.blend'}
+    CRITICAL: ONLY reference keys that are listed in the [PRE-DOWNLOADED ASSETS] block of the
+    user message. If a key is listed in [FAILED TO DOWNLOAD], do NOT use it in ASSETS at all —
+    generate that object procedurally with Blender primitives instead.
     Use ASSETS.get('key') to safely access. ASSETS may be empty if nothing was downloaded.
 - ASSET_PATH : str -- same as ASSET_DIR (backward-compat alias). Treat identically.
 - os, math, mathutils are pre-imported -- do NOT import them again.
 
-IMPORTING ASSETS -- use ASSETS['key'] for the file path, NEVER ASSET_DIR as a filepath:
+IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() for safety:
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder!
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_PATH)  # ← same problem
+  WRONG:  ASSETS['some_key']  # ← KeyError if not downloaded; use .get() instead
+  RIGHT:  fp = ASSETS.get('tree_model')
+          if fp: bpy.ops.wm.obj_import(filepath=fp)
+          else: # generate procedurally
 
   MODEL IMPORT -- the file could be .blend, .gltf, or .obj depending on what was available.
   ALWAYS use this helper; NEVER hardcode bpy.ops.wm.obj_import or bpy.ops.import_scene.gltf directly:
       def import_model(key):
-          fp = ASSETS[key]
+          fp = ASSETS.get(key)
+          if not fp:
+              return []  # asset not available — caller should generate procedurally
           ext = fp.rsplit('.', 1)[-1].lower()
           bpy.ops.object.select_all(action='DESELECT')
           if ext == 'blend':
@@ -173,14 +182,21 @@ IMPORTING ASSETS -- use ASSETS['key'] for the file path, NEVER ASSET_DIR as a fi
           else:  # .obj
               bpy.ops.wm.obj_import(filepath=fp)
           return list(bpy.context.selected_objects)
-      objs = import_model('tree_model')   # returns list of imported objects
-      obj = objs[0] if objs else bpy.context.active_object
+      objs = import_model('tree_model')   # returns [] if not downloaded
+      if objs:
+          obj = objs[0]
+      else:
+          # generate procedurally
+          bpy.ops.mesh.primitive_cone_add(vertices=8, radius1=1, depth=4)
+          obj = bpy.context.active_object
 
-  TEXTURE:
-      img = bpy.data.images.load(ASSETS['wood_texture'])
-      tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
-      tex_node.image = img
-      mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+  TEXTURE (guard with .get() — skip if not available):
+      tex_path = ASSETS.get('wood_texture')
+      if tex_path:
+          img = bpy.data.images.load(tex_path)
+          tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
+          tex_node.image = img
+          mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
 
   HDRI environment map (sky/background lighting):
       world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')
@@ -191,7 +207,7 @@ IMPORTING ASSETS -- use ASSETS['key'] for the file path, NEVER ASSET_DIR as a fi
       bg  = nt.nodes.new('ShaderNodeBackground')
       env = nt.nodes.new('ShaderNodeTexEnvironment')
       out = nt.nodes.new('ShaderNodeOutputWorld')
-      env.image = bpy.data.images.load(ASSETS['sky_hdri'])
+      env.image = bpy.data.images.load(ASSETS.get('sky_hdri', ''))  # guard: only set if available
       nt.links.new(env.outputs['Color'], bg.inputs['Color'])
       nt.links.new(bg.outputs['Background'], out.inputs['Surface'])
       bg.inputs['Strength'].default_value = 1.0
@@ -599,7 +615,12 @@ async function searchWebAssets(userPrompt, assetList) {
 
 /**
  * Generate Blender Python code with reasoning from a natural language prompt.
- * @param {string} userPromptuserPrompt, history = [], opts = {}) {
+ * @param {string} userPrompt
+ * @param {Array<{prompt: string, code: string}>} history
+ * @param {{assetDict?: Record<string,string>, failedAssets?: string[]}} opts
+ * @returns {Promise<{thinking: string|null, code: string}>}
+ */
+async function getCopilotResponse(userPrompt, history = [], opts = {}) {
   const token = getGitHubToken();
   const model = await discoverModel();
 
@@ -609,15 +630,18 @@ async function searchWebAssets(userPrompt, assetList) {
     messages.push({ role: 'assistant', content: code });
   }
 
-  let userContent = userPrompt;
-  if (opts.assetDict && Object.keys(opts.assetDict).length > 0) {
-    const listing = Object.entries(opts.assetDict)
-      .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
-      .join(',\n');
-    userContent =
-      `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
-      userPrompt;
-  }
+  // Always inject the ASSETS ground truth so LLM never references unavailable keys.
+  const assetDict = opts.assetDict ?? {};
+  const listing = Object.entries(assetDict)
+    .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
+    .join(',\n');
+  const failedNote = (opts.failedAssets ?? []).length
+    ? `\n[FAILED TO DOWNLOAD — do NOT reference these keys in ASSETS: ${opts.failedAssets.join(', ')}]`
+    : '';
+  let userContent =
+    `[PRE-DOWNLOADED ASSETS in ASSETS dict:\n${listing || '  (none)'}\n]${failedNote}\n` +
+    userPrompt;
+
   // Wrap with image URLs if present (multimodal content)
   messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
@@ -693,15 +717,17 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
     messages.push({ role: 'assistant', content: code });
   }
 
-  let userContent = userPrompt;
-  if (opts.assetDict && Object.keys(opts.assetDict).length > 0) {
-    const listing = Object.entries(opts.assetDict)
-      .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
-      .join(',\n');
-    userContent =
-      `[PRE-DOWNLOADED ASSETS — use these via the ASSETS dict:\n${listing}\n]\n` +
-      userPrompt;
-  }
+  // Always inject the ASSETS ground truth so LLM never references unavailable keys.
+  const assetDict = opts.assetDict ?? {};
+  const assetListing = Object.entries(assetDict)
+    .map(([k, v]) => `  '${k}': r'${v.replace(/\\/g, '/')}'`)
+    .join(',\n');
+  const failedNote = (opts.failedAssets ?? []).length
+    ? `\n[FAILED TO DOWNLOAD — do NOT reference these keys in ASSETS: ${opts.failedAssets.join(', ')}]`
+    : '';
+  let userContent =
+    `[PRE-DOWNLOADED ASSETS in ASSETS dict:\n${assetListing || '  (none)'}\n]${failedNote}\n` +
+    userPrompt;
   messages.push({ role: 'user', content: await buildUserContent(userContent) });
 
   // --- Streaming state machine ---
@@ -838,4 +864,4 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponse, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel, resetModelCache };

@@ -173,6 +173,7 @@ async function main() {
 
   // ── REPL ──────────────────────────────────────────────────────────────
   const history = [];
+  const sessionAssets = {}; // Accumulates all downloaded assets across all prompts in this session
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -197,7 +198,8 @@ async function main() {
 
     let code;
     let thinking = null;
-    let assetDict = {};
+    let assetDict = sessionAssets; // Start with all previously downloaded assets
+    let failedAssets = [];
 
     if (BUILTIN_COMMANDS[line]) {
       code = BUILTIN_COMMANDS[line];
@@ -214,7 +216,12 @@ async function main() {
           assetList = await searchWebAssets(line, assetList);
           const labels = assetList.map((a) => `${a.key}(${a.type}${a.url ? '+url' : ''})`).join(', ');
           spin.update(`Downloading assets: ${labels}...`);
-          assetDict = await downloadAssets(assetList, (msg) => spin.update(msg));
+          const freshAssets = await downloadAssets(assetList, (msg) => spin.update(msg));
+          // Track which planned assets failed to download
+          failedAssets = assetList.filter((a) => !freshAssets[a.key]).map((a) => a.key);
+          // Merge into session-wide dict — follow-up prompts can access all prior assets
+          Object.assign(sessionAssets, freshAssets);
+          // assetDict already references sessionAssets (updated in-place above)
         }
 
         // ── Step 2: generate code with streaming thinking ──────────────────
@@ -226,7 +233,7 @@ async function main() {
         const border = fmt(c.dim, '─'.repeat(60));
         let thinkingHeaderPrinted = false;
 
-        const response = await getCopilotResponseStream(line, history, { assetDict }, {
+        const response = await getCopilotResponseStream(line, history, { assetDict, failedAssets }, {
           onThinkingStart() {
             spin.stop(fmt(c.green, '✔ Code generated'));
             process.stdout.write(`\n${fmt(c.bold, '💭 Reasoning:')}\n${border}\n`);
@@ -254,6 +261,11 @@ async function main() {
           console.log(border);
           thinking.split('\n').forEach((l) => console.log('  ' + fmt(c.cyan, l)));
           console.log(border);
+        }
+
+        // Warn about assets that could not be downloaded
+        if (failedAssets.length > 0) {
+          console.log(fmt(c.yellow, `  ⚠ Could not download: ${failedAssets.join(', ')} — LLM will generate procedurally`));
         }
       } catch (err) {
         spin.stop(fmt(c.red, `✖ Copilot error: ${err.message}`));
