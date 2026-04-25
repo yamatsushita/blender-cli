@@ -15,7 +15,7 @@
 const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
-const { getCopilotResponse, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel } = require('./copilot');
+const { getCopilotResponseStream, planAssets, searchWebAssets, discoverModel } = require('./copilot');
 const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
   executeInBlender,

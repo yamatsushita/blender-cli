@@ -838,4 +838,4 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, getCopilotResponse, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel, resetModelCache };
