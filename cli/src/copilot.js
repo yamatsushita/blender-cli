@@ -531,85 +531,95 @@ async function planAssets(userPrompt) {
 }
 
 /**
- * Ask Copilot to suggest specific direct download URLs for free 3D assets.
- * This enriches the asset list returned by planAssets() with concrete URLs
- * that the CLI can download directly — no API key required.
+ * Use Copilot vision to select the best asset from multiple candidates.
  *
- * Returns a new array with `url` fields added where found.
- * Items that couldn't be matched keep their original form (no url field).
+ * Downloads each candidate's preview thumbnail and sends all of them to the
+ * model alongside scene context.  The model replies with a single number
+ * identifying the best match.  Falls back to the first candidate on any error.
  *
- * @param {string} userPrompt
- * @param {Array<{type: string, query: string, key: string}>} assetList
- * @returns {Promise<Array<{type: string, query: string, key: string, url?: string}>>}
+ * @param {Array<{id:string, name:string, source:string, tags:string[], previewUrl:string|null}>} candidates
+ * @param {string} query        What kind of asset we're looking for ("oak wood floor texture")
+ * @param {string} sceneContext Full user prompt, so the model understands the surrounding scene
+ * @returns {Promise<string|null>}  Chosen candidate id, or null
  */
-async function searchWebAssets(userPrompt, assetList) {
-  if (assetList.length === 0) return assetList;
+async function selectAsset(candidates, query, sceneContext) {
+  if (!candidates || candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0].id;
+
   const token = getGitHubToken();
   const model = await discoverModel();
 
-  const assetJson = JSON.stringify(assetList, null, 2);
+  // Download all thumbnails in parallel; null means thumbnail unavailable
+  const withThumbs = await Promise.all(
+    candidates.map(async (c) => ({
+      ...c,
+      thumbBase64: c.previewUrl ? await fetchImageAsBase64(c.previewUrl) : null,
+    })),
+  );
 
-  const messages = [
-    {
-      role: 'system',
-      content:
-        'You are a 3D asset URL finder. Given a list of needed assets, provide direct download URLs ' +
-        'from free, CC0-licensed repositories. Respond ONLY with valid JSON — no prose, no markdown.\n\n' +
-        'Output format: {"assets": [{"key": "...", "url": "https://...direct-download-url..."}]}\n' +
-        'Only include entries where you are confident the URL is valid and the file is freely downloadable.\n' +
-        'Omit any asset if you are unsure. Do NOT invent URLs.\n\n' +
-        'KNOWN FREE REPOSITORIES — use these patterns:\n\n' +
-        'POLY HAVEN (polyhaven.com, CC0):\n' +
-        '  Models blend: https://dl.polyhaven.org/file/ph-assets/Models/{id}/{id}_1k.blend\n' +
-        '  HDRIs EXR:    https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/1k/{id}_1k.exr\n' +
-        '  Texture diff: https://dl.polyhaven.org/file/ph-assets/Textures/{id}/1k/{id}_diff_1k.jpg\n' +
-        '  Known HDRI IDs: studio_small_09, kloofendal_48d_partly_cloudy, sunset_jhbcentral,\n' +
-        '    industrial_sunset_02, sunset_in_the_chalk_quarry, sunflowers, kiara_1_dawn,\n' +
-        '    forest_slope, urban_street_02, belfast_sunset, golden_bay, meadow_2\n' +
-        '  Known model IDs: rubber_duck, tin_cup, coffee_mug, round_wooden_table, \n' +
-        '    old_wooden_chair, potted_plant_02, beer_bottle, wine_bottle, ceramic_vase_01\n\n' +
-        'KHRONOS GLTF SAMPLE MODELS (github.com/KhronosGroup/glTF-Sample-Models, CC license):\n' +
-        '  URL pattern: https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/{Name}/glTF/{Name}.gltf\n' +
-        '  Available (exact name required): Box, Duck, BrainStem, CesiumMilkTruck, Fox, Avocado,\n' +
-        '    Buggy, BarramundiFish, Corset, DamagedHelmet, FlightHelmet, Lantern, MetalRoughSpheres,\n' +
-        '    SciFiHelmet, Sponza, ToyCar, WaterBottle, AntiqueCamera, DragonAttenuation\n\n' +
-        'COMMON 3D TEST MODELS (github.com/alecjacobson/common-3d-test-models, free):\n' +
-        '  URL pattern: https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/{name}.obj\n' +
-        '  Available: teapot, stanford-bunny, xyzrgb_dragon, armadillo, lucy, spot, bob, fertility,\n' +
-        '    horse, camel, elephant, cow, cheburashka, suzanne, woody\n\n' +
-        'AMBIENT CG (ambientcg.com, CC0 PBR textures):\n' +
-        '  URL pattern: https://ambientcg.com/get?file={Id}_1K-JPG.zip  (zip containing textures)\n' +
-        '  Many IDs available: Bricks001..Bricks079, Concrete001..Concrete065, Metal001..Metal090,\n' +
-        '    Wood001..Wood094, Ground001..Ground075, Fabric001..Fabric099, Tiles001..Tiles139,\n' +
-        '    Leather001..Leather032, Grass001..Grass010, Rock001..Rock054, Plaster001..Plaster022\n',
-    },
-    {
-      role: 'user',
-      content:
-        `Scene request: "${userPrompt}"\n\nAssets needed:\n${assetJson}\n\n` +
-        'For each asset, provide a direct download URL if you know a good free source. ' +
-        'Return JSON with only the assets you found URLs for.',
-    },
-  ];
+  const hasAnyThumb = withThumbs.some((c) => c.thumbBase64);
+
+  // Build multimodal or text-only message depending on thumbnail availability
+  let userContent;
+  if (hasAnyThumb) {
+    const parts = [
+      {
+        type: 'text',
+        text:
+          `I am building a 3D scene and need to pick the most visually appropriate asset.\n\n` +
+          `Scene: ${sceneContext}\n` +
+          `Asset needed: ${query}\n\n` +
+          `Below are ${candidates.length} candidates. For each I show its name, tags, ` +
+          `and a preview thumbnail image:`,
+      },
+    ];
+    for (let i = 0; i < withThumbs.length; i++) {
+      const c = withThumbs[i];
+      const tagStr = c.tags.slice(0, 6).join(', ');
+      parts.push({
+        type: 'text',
+        text: `\n[${i + 1}] ${c.name} (source: ${c.source}${tagStr ? '; tags: ' + tagStr : ''})`,
+      });
+      if (c.thumbBase64) {
+        parts.push({ type: 'image_url', image_url: { url: c.thumbBase64, detail: 'low' } });
+      }
+    }
+    parts.push({
+      type: 'text',
+      text: `\nReply with ONLY the number (1-${candidates.length}) of the best match. No explanation.`,
+    });
+    userContent = parts;
+  } else {
+    // No thumbnails available — text-only selection
+    const lines = withThumbs.map(
+      (c, i) => `[${i + 1}] ${c.name} (${c.source}; tags: ${c.tags.slice(0, 6).join(', ')})`,
+    );
+    userContent =
+      `Scene: ${sceneContext}\nAsset needed: ${query}\n\nCandidates:\n${lines.join('\n')}\n\n` +
+      `Reply with ONLY the number (1-${candidates.length}) of the best match. No explanation.`;
+  }
 
   try {
-    const payload = JSON.stringify({ model, messages, max_tokens: 600, temperature: 0 });
+    const payload = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: userContent }],
+      max_tokens: 10,
+      temperature: 0,
+    });
     const headers = { ...copilotHeaders(token), 'Content-Length': Buffer.byteLength(payload) };
     const { statusCode, body } = await httpsRequest(
       { hostname: COPILOT_ENDPOINT, path: '/chat/completions', method: 'POST', headers },
-      payload, 20_000,
+      payload,
+      30_000,
     );
-    if (statusCode !== 200) return assetList;
-    const raw = (JSON.parse(body).choices?.[0]?.message?.content ?? '{}')
-      .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-    const found = JSON.parse(raw);
-    const urlMap = {};
-    for (const item of (found.assets ?? [])) {
-      if (item.key && item.url) urlMap[item.key] = item.url;
-    }
-    // Merge URLs back into the original asset list
-    return assetList.map((a) => urlMap[a.key] ? { ...a, url: urlMap[a.key] } : a);
-  } catch { return assetList; }
+    if (statusCode !== 200) return candidates[0].id;
+    const resp = (JSON.parse(body).choices?.[0]?.message?.content ?? '1').trim();
+    const idx  = parseInt(resp.match(/\d+/)?.[0] ?? '1', 10) - 1;
+    const chosen = candidates[Math.max(0, Math.min(idx, candidates.length - 1))];
+    return chosen.id;
+  } catch {
+    return candidates[0].id;
+  }
 }
 
 
@@ -864,4 +874,4 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
 /** Reset cached model (useful for testing). */
 function resetModelCache() { _cachedModel = null; }
 
-module.exports = { getCopilotCode, getCopilotResponse, getCopilotResponseStream, planAssets, searchWebAssets, discoverModel, resetModelCache };
+module.exports = { getCopilotCode, getCopilotResponse, getCopilotResponseStream, planAssets, selectAsset, discoverModel, resetModelCache };

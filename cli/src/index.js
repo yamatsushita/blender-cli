@@ -15,7 +15,7 @@
 const readline = require('readline');
 const path = require('path');
 const fs = require('fs');
-const { getCopilotResponseStream, planAssets, searchWebAssets, discoverModel } = require('./copilot');
+const { getCopilotResponseStream, planAssets, selectAsset, discoverModel } = require('./copilot');
 const { ASSET_ROOT, downloadAssets } = require('./assets');
 const {
   executeInBlender,
@@ -210,13 +210,15 @@ async function main() {
       try {
         let assetList = await planAssets(line);
 
-        // ── Step 1b: web-search for direct download URLs ───────────────────
         if (assetList.length > 0) {
-          spin.update('Searching web for assets...');
-          assetList = await searchWebAssets(line, assetList);
-          const labels = assetList.map((a) => `${a.key}(${a.type}${a.url ? '+url' : ''})`).join(', ');
-          spin.update(`Downloading assets: ${labels}...`);
-          const freshAssets = await downloadAssets(assetList, (msg) => spin.update(msg));
+          const labels = assetList.map((a) => `${a.key}(${a.type})`).join(', ');
+          spin.update(`Searching & AI-selecting assets: ${labels}...`);
+          const freshAssets = await downloadAssets(
+            assetList,
+            (msg) => spin.update(msg),
+            selectAsset,   // AI vision selection callback
+            line,          // full user prompt as scene context
+          );
           // Track which planned assets failed to download
           failedAssets = assetList.filter((a) => !freshAssets[a.key]).map((a) => a.key);
           // Merge into session-wide dict — follow-up prompts can access all prior assets
