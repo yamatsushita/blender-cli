@@ -1,28 +1,34 @@
 # 🎨 Blender Copilot CLI
 
 Edit your Blender 3D scene with natural language, powered by **GitHub Copilot**.  
-No server to start, no ports to configure — communication happens through a shared directory.
+No server to start, no ports to configure — communication happens through a shared local directory.
 
 ```
-▶ place a Stanford armadillo next to the monkey, white and reflective
-⠙ Searching Poly Haven models for "stanford armadillo"...
-⠙ Downloading model: armadillo.obj...
+▶ create a scene that looks like this: https://example.com/photo.jpg
+⠙ Searching models for "winged angel statue"...
+⠙ Found 7 candidates, AI selecting best for "winged angel statue"...
+⠙ Selected model: Stanford Lucy (Angel) (common3d)
+⠙ Downloading Stanford Lucy (Angel)...
+⠙ Searching HDRIs for "museum interior soft light"...
+⠙ Found 8 candidates, AI selecting best HDRI for "museum interior soft light"...
+⠙ Selected HDRI: studio_small_09
+⠙ Downloading HDRI: studio_small_09_1k.exr...
 ⠙ Asking GitHub Copilot...
 ✔ Code generated
 
 💭 Reasoning:
 ────────────────────────────────────────────────────────────
-  The armadillo OBJ is pre-downloaded in ASSETS['armadillo_model'].
-  I'll import it, scale it, position it next to Suzanne at x=3,
-  then apply a white Principled BSDF with low roughness and clearcoat.
+  REASONING: Importing lucy.obj, scaling to ~4 units, placing on a dark
+  pedestal, applying marble material. Studio HDRI loaded for soft ambient
+  lighting. Camera set to front-elevated view at 50 mm.
 ────────────────────────────────────────────────────────────
 
 📝 Generated code:
 ────────────────────────────────────────────────────────────
-  bpy.ops.wm.obj_import(filepath=ASSETS['armadillo_model'])
-  obj = bpy.context.active_object
-  obj.location = (3, 0, 0)
-  ...
+  def import_model(key):
+      fp = ASSETS.get(key)
+      if not fp: return []
+      ...
 ────────────────────────────────────────────────────────────
 
 ✔ Scene updated
@@ -36,16 +42,22 @@ No server to start, no ports to configure — communication happens through a sh
 Your terminal
 ─────────────
 $ blender-cli
-▶  "place a stanford armadillo with a wood texture"
+▶  "place a stanford bunny with a marble texture"
         │
-        ├─► planAssets() → [armadillo model, wood texture]
+        ├─► planAssets() → needs [bunny model, marble texture]
         │         │
-        │         ▼  download if not cached
+        │         ▼  search Poly Haven + ambientCG for candidates
+        │   searchPolyHavenCandidates("stanford bunny") → 7 candidates
+        │         │
+        │         ▼  download candidate thumbnails → Copilot vision
+        │   selectAsset(candidates, query, scene context)
+        │         │
+        │         ▼  download AI-chosen asset
         │   ~/.blender-copilot/assets/
-        │     models/armadillo.obj
-        │     textures/wood_floor_diff_1k.jpg
+        │     models/stanford-bunny.obj
+        │     textures/marble_01_diff_1k.jpg
         │
-        ▼  GitHub Copilot Chat API (Claude Opus 4.6)
+        ▼  GitHub Copilot Chat API (e.g. Claude Opus 4.6)
    code generated with ASSETS dict injected
         │
         ▼  write files
@@ -66,11 +78,12 @@ $ blender-cli
    CLI reads result.json, shows outcome
 ```
 
-1. You type a **natural language prompt** in the terminal.
-2. Copilot is asked whether any 3D models or textures need to be downloaded.
-3. Assets are fetched from the **built-in registry** (Stanford meshes, Utah teapot…), **Poly Haven** (CC0 models, textures, HDRIs, .blend files), or **ambientCG** (CC0 PBR textures) and cached locally.
-4. Copilot generates Python `bpy` code with `ASSET_PATH`, `ASSETS`, `os`, and `math` pre-injected.
-5. The code is sent to Blender via the file bridge and executed on Blender's main thread.
+1. You type a **natural language prompt** (text or image URL).
+2. Copilot decides which 3D assets are needed (models, textures, HDRIs).
+3. The CLI searches Poly Haven and ambientCG for multiple candidates, downloads their **preview thumbnails**, and asks Copilot to **visually select** the best match for your scene.
+4. The chosen asset is downloaded and cached locally.
+5. Copilot generates Python `bpy` code with `ASSET_DIR`, `ASSETS`, `os`, `math`, and `mathutils` pre-injected.
+6. The code is sent to Blender via the file bridge and executed on Blender's main thread.
 
 ---
 
@@ -100,7 +113,7 @@ $ blender-cli
 3. **Edit → Preferences → Add-ons → Install…** and select the zip.
 4. Search for **"Copilot CLI Bridge"** and enable it with the checkbox.
 
-> The addon watches a session directory and executes code every 0.25 s on Blender's main thread.  
+> The addon watches the session directory and executes code every 0.25 s on Blender's main thread.  
 > A status panel is available at **View3D → Sidebar (N) → Copilot**.
 
 ### 2 — Install the CLI
@@ -132,17 +145,19 @@ blender-cli [--dry-run] [--no-launch] [--help]
 
 OPTIONS
   --dry-run    Generate code but do NOT send to Blender
-  --no-launch  Skip auto-launching Blender
+  --no-launch  Skip auto-launching Blender (use if Blender is already open)
   --help       Show help
 
 ENV VARS
   BLENDER_PATH  Full path to the Blender executable (auto-detected if omitted)
-  ASSET_PATH    Asset library root folder (default: ~/.blender-copilot/assets/)
-                  models/    ← downloaded OBJ/GLTF meshes
-                  textures/  ← downloaded PNG/JPG texture maps
+  ASSET_PATH    Asset cache folder (default: ~/.blender-copilot/assets/)
+                  models/    ← downloaded OBJ/GLTF/blend meshes
+                  textures/  ← downloaded PNG/JPG PBR texture maps
                   hdris/     ← downloaded EXR/HDR environment maps
                   blends/    ← downloaded native .blend files
 ```
+
+`ASSET_PATH` is optional — the default location works fine for most users.
 
 ### Always-available Python variables
 
@@ -150,30 +165,28 @@ Every generated code block has these pre-injected before execution:
 
 ```python
 import os, math, mathutils
-ASSET_DIR = '/Users/you/.blender-copilot/assets'   # root folder (use for path building only)
-ASSET_PATH = ASSET_DIR                              # backward-compat alias
-ASSETS = {                                          # files for this request
-    'armadillo_model': '.../models/armadillo.obj',
-    'wood_texture':    '.../textures/wood_floor_diff_1k.jpg',
-    'sky_hdri':        '.../hdris/sunny_sky_1k.exr',
-    'chair_blend':     '.../blends/chair.blend',
+ASSET_DIR  = '/Users/you/.blender-copilot/assets'   # root cache folder
+ASSET_PATH = ASSET_DIR                               # backward-compat alias
+ASSETS = {                                           # files downloaded for this request
+    'bunny_model':   '.../models/stanford-bunny.obj',
+    'marble_texture': '.../textures/marble_01_diff_1k.jpg',
+    'sky_hdri':      '.../hdris/studio_small_09_1k.exr',
 }
 ```
 
-`ASSETS` is empty (`{}`) when no download was needed.
+`ASSETS` is empty (`{}`) when no download was needed. **Always use `ASSETS.get('key')`** — if a download failed, the key will be absent and the generated code falls back to procedural geometry.
 
 ### Asset sources
 
-| Source | Asset types | Coverage |
-|--------|------------|----------|
-| Built-in registry | Models | Stanford armadillo, bunny, dragon, lucy; Utah/Stanford teapot; Spot (cow) |
-| [Poly Haven](https://polyhaven.com/models) | Models | 100s of CC0 models (architecture, nature, props) |
-| [Poly Haven](https://polyhaven.com/textures) | Textures | 700+ CC0 PBR textures (wood, brick, concrete, marble…) |
-| [Poly Haven](https://polyhaven.com/hdris) | HDRIs | 700+ CC0 EXR environment maps (sky, indoor, studio, forest…) |
-| [Poly Haven](https://polyhaven.com/models) | .blend files | Native Blender scene files with materials+rigging intact |
-| [ambientCG](https://ambientcg.com) | Textures (fallback) | 1000+ CC0 PBR texture sets (zip download, auto-extracted) |
+| Source | Types | Notes |
+|--------|-------|-------|
+| [Poly Haven](https://polyhaven.com/) | Models, Textures, HDRIs, .blend | CC0; selected by AI visual inspection of thumbnails |
+| [ambientCG](https://ambientcg.com/) | Textures | CC0 PBR texture sets; selected by AI visual inspection |
+| Built-in mesh collection | Models | Stanford bunny/dragon/armadillo/lucy, Utah teapot, Spot (cow), etc. |
 
 All sources are **completely free and CC0-licensed** (no attribution required).
+
+**Asset selection is AI-driven**: for each needed asset, the CLI fetches up to 8 candidates from live APIs, downloads their preview thumbnails, and sends the thumbnails to Copilot as images. Copilot picks the candidate that visually best matches your scene — not by filename, but by looking at the actual content.
 
 ### REPL commands
 
@@ -199,24 +212,36 @@ $ ASSET_PATH=~/my-assets blender-cli
   Copilot model: claude-opus-4.6
 
 ▶ add a stanford bunny with a marble texture on a dark background
-⠙ Downloading model: stanford_bunny.obj...
-⠙ Searching Poly Haven textures for "marble"...
+⠙ Searching models for "stanford bunny"...
+⠙ Found 4 candidates, AI selecting best for "stanford bunny"...
+⠙ Selected model: Stanford Bunny (common3d)
+⠙ Downloading Stanford Bunny...
+⠙ Searching textures for "marble"...
+⠙ Found 10 candidates, AI selecting best texture for "marble"...
+⠙ Selected texture: marble_01 (polyhaven)
 ⠙ Downloading texture: marble_01_diff_1k.jpg...
 ⠙ Asking GitHub Copilot...
 ✔ Code generated
 
 💭 Reasoning:
-──────────────────────────────────────────
-  ASSETS has bunny_model and marble_texture.
-  Import OBJ, apply marble texture via ShaderNodeTexImage...
-──────────────────────────────────────────
+────────────────────────────────────────────────────────────
+  REASONING: Import bunny OBJ, apply marble texture via ShaderNodeTexImage,
+  set dark world background, camera at front-elevated position.
+────────────────────────────────────────────────────────────
 
 📝 Generated code:
-──────────────────────────────────────────
-  bpy.ops.wm.obj_import(filepath=ASSETS['bunny_model'])
-  ...
-──────────────────────────────────────────
+────────────────────────────────────────────────────────────
+  def import_model(key):
+      fp = ASSETS.get(key)
+      if not fp: return []
+      ...
+────────────────────────────────────────────────────────────
 
+✔ Scene updated
+
+▶ describe this and recreate it: https://example.com/scene.jpg
+⠙ Searching models for ...
+...
 ✔ Scene updated
 
 ▶ /undo
@@ -237,23 +262,47 @@ blender-cli/
     ├── bin/
     │   └── blender-cli.js    # Executable entry point
     └── src/
-        ├── index.js          # Interactive REPL, spinner, asset orchestration
-        ├── copilot.js        # GitHub Copilot Chat API client + planAssets()
-        ├── assets.js         # Model/texture/HDRI/blend download & cache (registry + Poly Haven + ambientCG)
+        ├── index.js          # Interactive REPL, spinner, session orchestration
+        ├── copilot.js        # Copilot API client: planAssets(), selectAsset(),
+        │                     #   getCopilotResponseStream()
+        ├── assets.js         # Multi-candidate search + AI-driven download:
+        │                     #   Poly Haven, ambientCG, common-3d-test-models
         └── blender.js        # File-based bridge + Blender auto-launch
+```
+
+### Asset pipeline detail
+
+```
+planAssets(prompt)
+    │  Copilot reads the prompt, returns [{type, query, key}]
+    │
+    ▼
+For each asset:
+    searchPolyHavenCandidates(query, category, limit=8)
+    searchAmbientCGCandidates(query, limit=5)         [textures only]
+    WELL_KNOWN_MODELS filter                           [models only]
+    │
+    ▼  download thumbnails in parallel
+    selectAsset(candidates, query, sceneContext)
+    │  → Copilot sees actual thumbnail images, picks best index
+    │
+    ▼
+    downloadPolyHavenBundle / common3d download / ambientCG zip extract
 ```
 
 ### Session isolation
 
 Each `blender-cli` invocation creates a unique session directory under `~/.blender-copilot/<uuid>/`.  
-Blender is launched with `--python startup.py` that watches only that directory.  
+Blender is launched with `--python startup.py` which watches only that directory.  
 Multiple Blender instances can run simultaneously — each CLI only talks to its own paired instance.
+
+Previously downloaded assets persist across prompts within a session. If an asset download fails, the LLM is told explicitly and generates procedural geometry instead of raising a `KeyError`.
 
 ### Blender addon internals
 
 `bpy.app.timers.register(_poll_and_execute, persistent=True)` fires every **0.25 s** on Blender's main thread.  
 When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws all viewports, and writes `result.json`.  
-`undo/redo` are detected and run under a window-only `temp_override` instead of a VIEW_3D override.
+`undo/redo` are detected and run under a window-only `temp_override` instead of a `VIEW_3D` override.
 
 ---
 
@@ -262,6 +311,7 @@ When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws
 - All file I/O stays in `~/.blender-copilot/` on your local machine — no network port is opened.
 - `exec()` runs with full Python access inside the Blender process. Only run code you trust.
 - Your GitHub token is read from `gh auth token` and sent to `api.githubcopilot.com` over HTTPS; it is never stored on disk by this tool.
+- Asset downloads come from Poly Haven, ambientCG, and GitHub — all HTTPS, no third-party accounts needed.
 
 ---
 
@@ -269,10 +319,11 @@ When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws
 
 | Symptom | Fix |
 |---------|-----|
-| Timeout after 30 s | Enable the **Copilot CLI Bridge** addon in Blender (Edit → Preferences → Add-ons) |
+| Timeout after 45 s on first launch | Blender may be slow to start; check the log file shown in the terminal |
 | `Could not get GitHub token` | Run `gh auth login` |
 | `Copilot API error 401` | Token expired — re-authenticate with `gh auth login` |
 | `name 'ASSETS' is not defined` | Reinstall the CLI: `cd cli && npm install -g .` |
+| Asset not found / wrong asset | The AI visual selector picks from real thumbnails; rephrase the query with more specific descriptors |
 | Code runs but scene doesn't update | Make sure you're in Object Mode; restart Blender if the addon timer stopped |
 
 ---
@@ -281,219 +332,3 @@ When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws
 
 MIT
 
-
-```
-▶ add a glossy red sphere above the default cube
-⠙ Asking GitHub Copilot…
-✔ Code generated
-
-📝 Generated code:
-────────────────────────────────────────────────────────────
-  import bpy
-  bpy.ops.mesh.primitive_uv_sphere_add(radius=1, location=(0, 0, 3))
-  obj = bpy.context.active_object
-  mat = bpy.data.materials.new(name="GlossyRed")
-  mat.use_nodes = True
-  bsdf = mat.node_tree.nodes["Principled BSDF"]
-  bsdf.inputs["Base Color"].default_value = (1, 0, 0, 1)
-  bsdf.inputs["Roughness"].default_value = 0.05
-  obj.data.materials.append(mat)
-────────────────────────────────────────────────────────────
-
-✔ Scene updated in Blender
-```
-
----
-
-## How it works
-
-```
-Your terminal
-─────────────
-$ blender-cli
-▶  "add a blue torus at (2, 0, 1)"
-        │
-        ▼  gh auth token + Copilot Chat API
-   copilot.js ──────────────────────────► gpt-4o
-                ◄──────────────────────── Python bpy code
-        │
-        ▼  write files
-   ~/.blender-cli/
-     run.py       ← generated Python code
-     run.trigger  ← signals Blender to execute
-
-                          Blender (addon timer, every 0.25 s)
-                          ────────────────────────────────────
-                          sees run.trigger
-                              │
-                              ▼  exec() on main thread
-                          bpy scene updates live ✨
-                              │
-                              ▼  write
-                          result.json  ← success / error
-
-   CLI reads result.json, shows outcome
-```
-
-1. You type a **natural language prompt** in the terminal.
-2. The CLI authenticates via `gh auth token` and calls the **GitHub Copilot Chat API**.
-3. Copilot returns Python code using the `bpy` (Blender Python) API.
-4. The CLI writes the code to `~/.blender-cli/run.py` and creates `run.trigger`.
-5. The Blender addon's background timer picks up the trigger, **executes the code on the main thread**, and writes `result.json`.
-6. The CLI reads the result and shows success or error.
-
----
-
-## Requirements
-
-| Tool | Version |
-|------|---------|
-| [Blender](https://www.blender.org/download/) | 3.0+ |
-| [Node.js](https://nodejs.org/) | 18+ |
-| [GitHub CLI](https://cli.github.com/) | 2.x (`gh`) |
-| GitHub Copilot subscription | Individual or Business |
-
----
-
-## Setup
-
-### 1 — Install the Blender addon
-
-1. Open Blender.
-2. Zip the `blender_addon/` folder:
-   ```bash
-   # From the repo root
-   Compress-Archive blender_addon blender_copilot_bridge.zip   # PowerShell
-   # or:  zip -r blender_copilot_bridge.zip blender_addon/     # macOS/Linux
-   ```
-3. **Edit → Preferences → Add-ons → Install…** and select the zip.
-4. Search for **"Copilot CLI Bridge"** and enable it with the checkbox.
-
-That's it — no server to start. The addon begins watching `~/.blender-cli/` immediately.  
-A status panel is available at **View3D → Sidebar (N) → Copilot** for reference.
-
-### 2 — Install the CLI
-
-```bash
-cd cli
-npm install
-npm link          # makes `blender-cli` available globally
-```
-
-Or run without installing:
-
-```bash
-node cli/src/index.js
-```
-
-### 3 — Authenticate with GitHub Copilot
-
-```bash
-gh auth login     # if not already logged in
-```
-
----
-
-## Usage
-
-```
-blender-cli [--dry-run] [--help]
-
-OPTIONS
-  --dry-run    Generate code but do NOT send to Blender
-  --help       Show help
-```
-
-### REPL commands
-
-| Command    | Description |
-|------------|-------------|
-| `/undo`    | Undo the last operation in Blender |
-| `/clear`   | Delete all mesh objects in the scene |
-| `/history` | Show prompts used in this session |
-| `/quit`    | Exit the CLI |
-
-### Example session
-
-```
-$ blender-cli
-🎨 Blender Copilot CLI
-  Bridge directory: /Users/you/.blender-cli
-  Make sure the "Copilot CLI Bridge" addon is enabled in Blender.
-
-▶  delete the default cube
-✔ Code generated
-✔ Scene updated in Blender
-
-▶  create a mountain landscape using a subdivided plane with displacement
-✔ Code generated
-✔ Scene updated in Blender
-
-▶  add a sun lamp pointing down at 45 degrees
-✔ Code generated
-✔ Scene updated in Blender
-
-▶  /undo
-  [built-in command]
-✔ Scene updated in Blender
-
-▶  /quit
-Goodbye! 👋
-```
-
-### Dry-run (preview only)
-
-```bash
-blender-cli --dry-run
-```
-
-Generates and prints the code without touching Blender — useful for reviewing or learning Blender Python.
-
----
-
-## Architecture
-
-```
-blender-cli/
-├── blender_addon/
-│   └── __init__.py          # Blender addon: bpy.app.timers watcher + UI panel
-└── cli/
-    ├── package.json
-    ├── bin/
-    │   └── blender-cli.js    # Executable entry point
-    └── src/
-        ├── index.js         # Interactive REPL, spinner, session history
-        ├── copilot.js       # GitHub Copilot Chat API client
-        └── blender.js       # File-based bridge (~/.blender-cli/)
-```
-
-### Blender addon internals
-
-`bpy.app.timers.register(_poll_and_execute, persistent=True)` registers a callback that fires every **0.25 s** on Blender's main thread.  
-When `run.trigger` appears, the callback reads `run.py`, calls `exec()`, redraws all viewports, and writes `result.json`.  
-The CLI polls `result.json` every 150 ms (matching the request ID) for up to 30 s.
-
----
-
-## Security notes
-
-- All file I/O stays in `~/.blender-cli/` on your local machine — no network port is opened.
-- `exec()` runs with full Python access inside the Blender process. Only run code you trust.
-- Your GitHub token is read from `gh auth token` and sent to `api.githubcopilot.com` over HTTPS; it is never stored on disk by this tool.
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| Timeout after 30 s | Enable the **Copilot CLI Bridge** addon in Blender (Edit → Preferences → Add-ons) |
-| `Could not get GitHub token` | Run `gh auth login` |
-| `Copilot API error 401` | Token expired — re-authenticate with `gh auth login` |
-| Code runs but scene doesn't update visually | Make sure you're in Object Mode; some `bpy.ops` require specific context |
-
----
-
-## License
-
-MIT
