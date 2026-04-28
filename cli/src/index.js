@@ -173,7 +173,6 @@ async function main() {
 
   // ── REPL ──────────────────────────────────────────────────────────────
   const history = [];
-  const sessionAssets = {}; // Accumulates all downloaded assets across all prompts in this session
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -198,7 +197,7 @@ async function main() {
 
     let code;
     let thinking = null;
-    let assetDict = sessionAssets; // Start with all previously downloaded assets
+    let assetDict = {}; // Fresh each prompt — no reuse from prior downloads
     let failedAssets = [];
 
     if (BUILTIN_COMMANDS[line]) {
@@ -221,9 +220,7 @@ async function main() {
           );
           // Track which planned assets failed to download
           failedAssets = assetList.filter((a) => !freshAssets[a.key]).map((a) => a.key);
-          // Merge into session-wide dict — follow-up prompts can access all prior assets
-          Object.assign(sessionAssets, freshAssets);
-          // assetDict already references sessionAssets (updated in-place above)
+          assetDict = freshAssets;
         }
 
         // ── Step 2: generate code with streaming thinking ──────────────────

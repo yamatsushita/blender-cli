@@ -162,27 +162,37 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
           if fp: bpy.ops.wm.obj_import(filepath=fp)
           else: # generate procedurally
 
-  MODEL IMPORT -- the file could be .blend, .gltf, or .obj depending on what was available.
-  ALWAYS use this helper; NEVER hardcode bpy.ops.wm.obj_import or bpy.ops.import_scene.gltf directly:
+  MODEL IMPORT -- the file could be .blend, .gltf, .obj, .dae, .stl, or a DIRECTORY of mesh files.
+  ALWAYS use this helper; NEVER hardcode any import operator directly:
       def import_model(key):
           fp = ASSETS.get(key)
           if not fp:
               return []  # asset not available — caller should generate procedurally
-          ext = fp.rsplit('.', 1)[-1].lower()
-          bpy.ops.object.select_all(action='DESELECT')
-          if ext == 'blend':
-              with bpy.data.libraries.load(fp, link=False) as (data_from, data_to):
-                  data_to.objects = list(data_from.objects)
-              for obj in data_to.objects:
-                  if obj is not None:
-                      bpy.context.scene.collection.objects.link(obj)
-                      obj.select_set(True)
-          elif ext in ('gltf', 'glb'):
-              bpy.ops.import_scene.gltf(filepath=fp)
-          else:  # .obj
-              bpy.ops.wm.obj_import(filepath=fp)
-          return list(bpy.context.selected_objects)
-      objs = import_model('tree_model')   # returns [] if not downloaded
+          import glob as _glob
+          def _import_file(p):
+              ext = p.rsplit('.', 1)[-1].lower()
+              bpy.ops.object.select_all(action='DESELECT')
+              if ext == 'blend':
+                  with bpy.data.libraries.load(p, link=False) as (data_from, data_to):
+                      data_to.objects = list(data_from.objects)
+                  return [o for o in data_to.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
+              elif ext in ('gltf', 'glb'):
+                  bpy.ops.import_scene.gltf(filepath=p)
+              elif ext == 'dae':
+                  bpy.ops.wm.collada_import(filepath=p)
+              elif ext == 'stl':
+                  bpy.ops.import_mesh.stl(filepath=p)
+              else:  # .obj and anything else
+                  bpy.ops.wm.obj_import(filepath=p)
+              return list(bpy.context.selected_objects)
+          if os.path.isdir(fp):
+              imported = []
+              for f in sorted(os.listdir(fp)):
+                  if f.lower().rsplit('.',1)[-1] in ('obj','gltf','glb','blend','dae','stl','ply','fbx'):
+                      imported.extend(_import_file(os.path.join(fp, f)))
+              return imported
+          return _import_file(fp)
+      objs = import_model('robot_model')   # returns [] if not downloaded
       if objs:
           obj = objs[0]
       else:
@@ -258,14 +268,26 @@ Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'w
 ## REASONING: Import the bunny (format unknown, use import_model helper).
 ## Apply wood texture via Principled BSDF ShaderNodeTexImage node.
 def import_model(key):
-    fp = ASSETS[key]; ext = fp.rsplit('.', 1)[-1].lower()
-    bpy.ops.object.select_all(action='DESELECT')
-    if ext == 'blend':
-        with bpy.data.libraries.load(fp, link=False) as (df, dt): dt.objects = list(df.objects)
-        [bpy.context.scene.collection.objects.link(o) or o.select_set(True) for o in dt.objects if o]
-    elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=fp)
-    else: bpy.ops.wm.obj_import(filepath=fp)
-    return list(bpy.context.selected_objects)
+    fp = ASSETS.get(key)
+    if not fp: return []
+    def _import_file(p):
+        ext = p.rsplit('.', 1)[-1].lower()
+        bpy.ops.object.select_all(action='DESELECT')
+        if ext == 'blend':
+            with bpy.data.libraries.load(p, link=False) as (df, dt): dt.objects = list(df.objects)
+            return [o for o in dt.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
+        elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=p)
+        elif ext == 'dae': bpy.ops.wm.collada_import(filepath=p)
+        elif ext == 'stl': bpy.ops.import_mesh.stl(filepath=p)
+        else: bpy.ops.wm.obj_import(filepath=p)
+        return list(bpy.context.selected_objects)
+    if os.path.isdir(fp):
+        imported = []
+        for f in sorted(os.listdir(fp)):
+            if f.lower().rsplit('.',1)[-1] in ('obj','gltf','glb','blend','dae','stl','ply','fbx'):
+                imported.extend(_import_file(os.path.join(fp, f)))
+        return imported
+    return _import_file(fp)
 objs = import_model('bunny_model')
 obj = objs[0] if objs else bpy.context.active_object
 mat = bpy.data.materials.new(name="Wood")
@@ -483,7 +505,7 @@ async function planAssets(userPrompt) {
       content:
         'You are a 3D asset detector. Analyze the Blender scene request and respond ONLY with valid JSON ' +
         '(no markdown, no prose).\n' +
-        'Format: {"assets": [{"type": "model"|"texture"|"hdri"|"blend", "query": "<search term>", "key": "<snake_case_id>"}]}\n\n' +
+        'Format: {"assets": [{"type": "model"|"texture"|"hdri"|"blend", "query": "<search term>", "key": "<snake_case_id>", "url": "<optional direct URL>"}]}\n\n' +
         'Asset types:\n' +
         '- type="model" : any specific named 3D mesh/scan NOT a Blender primitive.\n' +
         '  Includes: Stanford meshes (armadillo, bunny, dragon, lucy, buddha),\n' +
@@ -497,6 +519,15 @@ async function planAssets(userPrompt) {
         '- type="blend" : native .blend scene/object file. Use ONLY when user explicitly asks for a\n' +
         '  Blender file or requests a complex pre-built 3D asset best served as a .blend.\n' +
         '- key: short snake_case id ("armadillo_model", "wood_texture", "sky_hdri", "chair_blend").\n' +
+        '- url: REQUIRED when the user provides a specific URL to download the asset from.\n' +
+        '  Examples:\n' +
+        '    "Download the model from https://github.com/frankarobotics/franka_description"\n' +
+        '      → {"type":"model","query":"franka panda robot","key":"robot_model","url":"https://github.com/frankarobotics/franka_description"}\n' +
+        '    "Use the asset at https://example.com/model.obj"\n' +
+        '      → {"type":"model","query":"model","key":"asset_model","url":"https://example.com/model.obj"}\n' +
+        '    "Import https://raw.githubusercontent.com/user/repo/main/mesh.gltf"\n' +
+        '      → {"type":"model","query":"mesh","key":"mesh_model","url":"https://raw.githubusercontent.com/user/repo/main/mesh.gltf"}\n' +
+        '  When url is provided, omit the search — the downloader will fetch directly from that URL.\n' +
         '- Do NOT include Blender primitives (cube, sphere, cylinder, torus, cone, monkey/Suzanne).\n' +
         '- If nothing needs downloading, return {"assets": []}.\n\n' +
         'Examples:\n' +

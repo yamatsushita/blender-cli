@@ -256,18 +256,14 @@ async function downloadPolyHavenBundle(formatObj, destDir, log = () => {}) {
   fs.mkdirSync(destDir, { recursive: true });
   const mainFname = path.basename(new URL(formatObj.url).pathname);
   const mainPath  = path.join(destDir, mainFname);
-  if (!fs.existsSync(mainPath)) {
-    log(`Downloading: ${mainFname}...`);
-    await downloadFile(formatObj.url, mainPath);
-  }
+  log(`Downloading: ${mainFname}...`);
+  await downloadFile(formatObj.url, mainPath);
   for (const [relPath, fileInfo] of Object.entries(formatObj.include ?? {})) {
     if (!fileInfo?.url) continue;
     const localPath = path.join(destDir, relPath);
     fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    if (!fs.existsSync(localPath)) {
-      log(`Downloading companion: ${path.basename(relPath)}...`);
-      await downloadFile(fileInfo.url, localPath);
-    }
+    log(`Downloading companion: ${path.basename(relPath)}...`);
+    await downloadFile(fileInfo.url, localPath);
   }
   return mainPath;
 }
@@ -315,10 +311,8 @@ async function resolveModel(query, sceneContext, selectFn, log = () => {}) {
   if (chosen.source === 'common3d') {
     const ext       = chosen.downloadUrl.split('.').pop();
     const localPath = path.join(MODELS_DIR, `${chosen.id}.${ext}`);
-    if (!fs.existsSync(localPath)) {
-      log(`Downloading ${chosen.name}...`);
-      await downloadFile(chosen.downloadUrl, localPath);
-    }
+    log(`Downloading ${chosen.name}...`);
+    await downloadFile(chosen.downloadUrl, localPath);
     return { absPath: localPath, format: ext, name: chosen.id };
   }
 
@@ -390,16 +384,13 @@ async function resolveTexture(query, sceneContext, selectFn, log = () => {}) {
     if (!imgInfo?.url) return null;
     const ext       = imgInfo.url.endsWith('.png') ? 'png' : 'jpg';
     const localPath = path.join(TEXTURES_DIR, `${chosen.id}_diff_1k.${ext}`);
-    if (!fs.existsSync(localPath)) {
-      log(`Downloading texture: ${chosen.id}_diff_1k.${ext}...`);
-      await downloadFile(imgInfo.url, localPath);
-    }
+    log(`Downloading texture: ${chosen.id}_diff_1k.${ext}...`);
+    await downloadFile(imgInfo.url, localPath);
     return { absPath: localPath, name: chosen.id };
   }
 
   if (chosen.source === 'ambientcg') {
     const localPath  = path.join(TEXTURES_DIR, `${chosen.id}_1K_Color.jpg`);
-    if (fs.existsSync(localPath)) return { absPath: localPath, name: chosen.id };
     const zipPath    = path.join(TEXTURES_DIR, `_tmp_${chosen.id}.zip`);
     const extractDir = path.join(TEXTURES_DIR, `_extract_${chosen.id}`);
     for (const res of ['1K', '2K']) {
@@ -459,10 +450,8 @@ async function resolveHDRI(query, sceneContext, selectFn, log = () => {}) {
 
   const ext       = res1k.exr ? 'exr' : 'hdr';
   const localPath = path.join(HDRIS_DIR, `${chosen.id}_1k.${ext}`);
-  if (!fs.existsSync(localPath)) {
-    log(`Downloading HDRI: ${chosen.id}_1k.${ext}...`);
-    await downloadFile(fileInfo.url, localPath);
-  }
+  log(`Downloading HDRI: ${chosen.id}_1k.${ext}...`);
+  await downloadFile(fileInfo.url, localPath);
   return { absPath: localPath, name: chosen.id };
 }
 
@@ -500,11 +489,140 @@ async function resolveBlend(query, sceneContext, selectFn, log = () => {}) {
   const assetDir  = path.join(BLENDS_DIR, chosen.id);
   const mainFname = path.basename(new URL(blendFmt.url).pathname);
   const mainPath  = path.join(assetDir, mainFname);
-  if (!fs.existsSync(mainPath)) {
-    log(`Downloading .blend: ${mainFname}...`);
-    await downloadPolyHavenBundle(blendFmt, assetDir, log);
-  }
+  log(`Downloading .blend: ${mainFname}...`);
+  await downloadPolyHavenBundle(blendFmt, assetDir, log);
   return { absPath: mainPath, name: chosen.id };
+}
+
+// ---------------------------------------------------------------------------
+// Batch downloader
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// URL-based resolver — when user provides a direct download link or GitHub repo URL
+// ---------------------------------------------------------------------------
+
+/** Walk a directory tree and collect all 3D mesh files, sorted by format priority. */
+function collectMeshFiles(dir) {
+  const MODEL_EXTS = ['.obj', '.gltf', '.glb', '.blend', '.dae', '.stl', '.ply', '.fbx'];
+  const EXT_PRIORITY = { '.obj': 1, '.gltf': 2, '.glb': 2, '.dae': 3, '.stl': 4, '.ply': 5, '.fbx': 6, '.blend': 7 };
+  const results = [];
+  function walk(d) {
+    try {
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (MODEL_EXTS.some((e) => entry.name.toLowerCase().endsWith(e))) results.push(full);
+      }
+    } catch (_) {}
+  }
+  walk(dir);
+  results.sort((a, b) => {
+    const pa = EXT_PRIORITY[path.extname(a).toLowerCase()] ?? 9;
+    const pb = EXT_PRIORITY[path.extname(b).toLowerCase()] ?? 9;
+    if (pa !== pb) return pa - pb;
+    // prefer larger files (more complete mesh)
+    try { return fs.statSync(b).size - fs.statSync(a).size; } catch { return 0; }
+  });
+  return results;
+}
+
+/**
+ * Download an asset directly from a user-provided URL.
+ *
+ * Handles:
+ *   - Direct file URLs (.obj / .gltf / .glb / .blend / .dae / .stl etc.)
+ *   - GitHub blob URLs  (github.com/.../blob/...)  → converted to raw.githubusercontent.com
+ *   - GitHub repo URLs  (github.com/owner/repo)    → ZIP archive extracted, mesh files collected
+ *
+ * When the source contains multiple mesh files (e.g. a robot description repo),
+ * all mesh files are copied flat into a per-key directory and that directory path
+ * is returned. The Blender `import_model` helper handles directory ASSETS automatically.
+ *
+ * @param {string} url
+ * @param {string} key
+ * @param {Function} log
+ * @returns {Promise<{absPath:string, format:string, name:string}|null>}
+ */
+async function resolveFromUrl(url, key, log = () => {}) {
+  // Convert GitHub blob URL → raw URL
+  const rawUrl = url.replace(
+    /github\.com\/([^/]+)\/([^/]+)\/blob\//,
+    'raw.githubusercontent.com/$1/$2/',
+  );
+
+  // Case 1: Direct 3D file URL (after blob→raw conversion)
+  const extMatch = rawUrl.match(/\.(obj|gltf|glb|blend|fbx|dae|stl|ply)(\?.*)?$/i);
+  if (extMatch) {
+    const ext       = extMatch[1].toLowerCase();
+    const localPath = path.join(MODELS_DIR, `${key}.${ext}`);
+    log(`Downloading ${key} from URL...`);
+    await downloadFile(rawUrl, localPath);
+    return { absPath: localPath, format: ext, name: key };
+  }
+
+  // Case 2: GitHub repo URL → download ZIP, extract, collect mesh files
+  const ghRepoMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)\/?(?:\?.*)?$/);
+  if (ghRepoMatch) {
+    const [, owner, repoRaw] = ghRepoMatch;
+    const repo       = repoRaw.replace(/\.git$/, '');
+    const zipPath    = path.join(MODELS_DIR, `_tmp_${key}.zip`);
+    const extractDir = path.join(MODELS_DIR, `_extract_${key}`);
+
+    for (const branch of ['main', 'master']) {
+      try {
+        cleanup([zipPath, extractDir]);
+        const zipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
+        log(`Downloading ${owner}/${repo} (${branch} branch)...`);
+        await downloadFile(zipUrl, zipPath);
+        extractZip(zipPath, extractDir);
+        fs.unlinkSync(zipPath);
+
+        const meshFiles = collectMeshFiles(extractDir);
+        if (meshFiles.length === 0) { cleanup([extractDir]); continue; }
+
+        if (meshFiles.length === 1) {
+          const ext       = path.extname(meshFiles[0]).slice(1).toLowerCase();
+          const localPath = path.join(MODELS_DIR, `${key}.${ext}`);
+          fs.copyFileSync(meshFiles[0], localPath);
+          cleanup([extractDir]);
+          log(`Downloaded 1 mesh file from ${owner}/${repo}`);
+          return { absPath: localPath, format: ext, name: key };
+        }
+
+        // Multiple mesh files: copy flat into a named directory
+        const destDir = path.join(MODELS_DIR, key);
+        fs.rmSync(destDir, { recursive: true, force: true });
+        fs.mkdirSync(destDir, { recursive: true });
+        const seen = new Set();
+        for (const mf of meshFiles) {
+          let fname = path.basename(mf);
+          if (seen.has(fname)) {
+            const base = path.basename(mf, path.extname(mf));
+            let i = 2;
+            while (seen.has(`${base}_${i}${path.extname(mf)}`)) i++;
+            fname = `${base}_${i}${path.extname(mf)}`;
+          }
+          seen.add(fname);
+          fs.copyFileSync(mf, path.join(destDir, fname));
+        }
+        cleanup([extractDir]);
+        log(`Downloaded ${meshFiles.length} mesh files from ${owner}/${repo}`);
+        return { absPath: destDir, format: 'dir', name: key };
+      } catch (_) {
+        cleanup([zipPath, extractDir]);
+      }
+    }
+    return null;
+  }
+
+  // Case 3: Unknown URL — try downloading directly
+  try {
+    const localPath = path.join(MODELS_DIR, `${key}_download`);
+    log(`Downloading ${key} from URL...`);
+    await downloadFile(url, localPath);
+    return { absPath: localPath, format: 'unknown', name: key };
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,11 +632,10 @@ async function resolveBlend(query, sceneContext, selectFn, log = () => {}) {
 /**
  * Download all requested assets and return a {key: absPath} mapping.
  *
- * @param {Array<{type:'model'|'texture'|'hdri'|'blend', query:string, key:string}>} assetList
+ * @param {Array<{type:'model'|'texture'|'hdri'|'blend', query:string, key:string, url?:string}>} assetList
  * @param {(msg:string) => void} [log]
  * @param {((candidates, query, sceneContext) => Promise<string|null>)|null} [selectFn]
- *        AI vision selection callback — provided by copilot.js via index.js
- * @param {string} [sceneContext]  Full user prompt, passed to selectFn for context
+ * @param {string} [sceneContext]
  * @returns {Promise<Record<string,string>>}  key -> absolute path
  */
 async function downloadAssets(assetList, log = () => {}, selectFn = null, sceneContext = '') {
@@ -526,10 +643,18 @@ async function downloadAssets(assetList, log = () => {}, selectFn = null, sceneC
   for (const item of assetList) {
     try {
       let r = null;
-      if      (item.type === 'model')   r = await resolveModel(item.query, sceneContext, selectFn, log);
-      else if (item.type === 'texture') r = await resolveTexture(item.query, sceneContext, selectFn, log);
-      else if (item.type === 'hdri')    r = await resolveHDRI(item.query, sceneContext, selectFn, log);
-      else if (item.type === 'blend')   r = await resolveBlend(item.query, sceneContext, selectFn, log);
+      if (item.url) {
+        // User provided an explicit download URL — use it directly, skip AI search
+        r = await resolveFromUrl(item.url, item.key, log);
+      } else if (item.type === 'model')   {
+        r = await resolveModel(item.query, sceneContext, selectFn, log);
+      } else if (item.type === 'texture') {
+        r = await resolveTexture(item.query, sceneContext, selectFn, log);
+      } else if (item.type === 'hdri')    {
+        r = await resolveHDRI(item.query, sceneContext, selectFn, log);
+      } else if (item.type === 'blend')   {
+        r = await resolveBlend(item.query, sceneContext, selectFn, log);
+      }
       if (r) result[item.key] = r.absPath;
     } catch (err) {
       log(`Warning: failed to download "${item.query}": ${err.message}`);
@@ -542,6 +667,6 @@ module.exports = {
   ASSET_ROOT,
   MODELS_DIR, TEXTURES_DIR, HDRIS_DIR, BLENDS_DIR,
   downloadAssets,
-  resolveModel, resolveTexture, resolveHDRI, resolveBlend,
+  resolveModel, resolveTexture, resolveHDRI, resolveBlend, resolveFromUrl,
   searchPolyHavenCandidates, searchAmbientCGCandidates,
 };
