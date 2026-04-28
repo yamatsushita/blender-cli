@@ -162,13 +162,12 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
           if fp: bpy.ops.wm.obj_import(filepath=fp)
           else: # generate procedurally
 
-  MODEL IMPORT -- the file could be .blend, .gltf, .obj, .dae, .stl, or a DIRECTORY of mesh files.
+  MODEL IMPORT -- the file could be .blend, .gltf, .obj, .stl, .dae, or a DIRECTORY of mesh files.
   ALWAYS use this helper; NEVER hardcode any import operator directly:
       def import_model(key):
           fp = ASSETS.get(key)
           if not fp:
               return []  # asset not available — caller should generate procedurally
-          import glob as _glob
           def _import_file(p):
               ext = p.rsplit('.', 1)[-1].lower()
               bpy.ops.object.select_all(action='DESELECT')
@@ -178,17 +177,26 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
                   return [o for o in data_to.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
               elif ext in ('gltf', 'glb'):
                   bpy.ops.import_scene.gltf(filepath=p)
-              elif ext == 'dae':
-                  bpy.ops.wm.collada_import(filepath=p)
               elif ext == 'stl':
                   bpy.ops.import_mesh.stl(filepath=p)
-              else:  # .obj and anything else
+              elif ext == 'dae':
+                  # bpy.ops.wm.collada_import was removed in Blender 4.x — skip silently
+                  if hasattr(bpy.ops.wm, 'collada_import'):
+                      bpy.ops.wm.collada_import(filepath=p)
+                  else:
+                      print(f"Skipping {p}: Collada importer not available in this Blender version")
+                      return []
+              else:  # .obj, .ply, .fbx, etc.
                   bpy.ops.wm.obj_import(filepath=p)
               return list(bpy.context.selected_objects)
+          # Extension priority order for a directory: prefer formats that work in Blender 4.x
+          EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
           if os.path.isdir(fp):
               imported = []
-              for f in sorted(os.listdir(fp)):
-                  if f.lower().rsplit('.',1)[-1] in ('obj','gltf','glb','blend','dae','stl','ply','fbx'):
+              files = os.listdir(fp)
+              def ext_rank(f): ext = f.lower().rsplit('.',1)[-1]; return EXT_ORDER.index(ext) if ext in EXT_ORDER else 99
+              for f in sorted(files, key=ext_rank):
+                  if f.lower().rsplit('.',1)[-1] in EXT_ORDER:
                       imported.extend(_import_file(os.path.join(fp, f)))
               return imported
           return _import_file(fp)
@@ -270,6 +278,7 @@ Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'w
 def import_model(key):
     fp = ASSETS.get(key)
     if not fp: return []
+    EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
     def _import_file(p):
         ext = p.rsplit('.', 1)[-1].lower()
         bpy.ops.object.select_all(action='DESELECT')
@@ -277,14 +286,16 @@ def import_model(key):
             with bpy.data.libraries.load(p, link=False) as (df, dt): dt.objects = list(df.objects)
             return [o for o in dt.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
         elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=p)
-        elif ext == 'dae': bpy.ops.wm.collada_import(filepath=p)
         elif ext == 'stl': bpy.ops.import_mesh.stl(filepath=p)
+        elif ext == 'dae':
+            if hasattr(bpy.ops.wm, 'collada_import'): bpy.ops.wm.collada_import(filepath=p)
+            else: return []  # Collada removed in Blender 4.x
         else: bpy.ops.wm.obj_import(filepath=p)
         return list(bpy.context.selected_objects)
     if os.path.isdir(fp):
         imported = []
-        for f in sorted(os.listdir(fp)):
-            if f.lower().rsplit('.',1)[-1] in ('obj','gltf','glb','blend','dae','stl','ply','fbx'):
+        for f in sorted(os.listdir(fp), key=lambda f: EXT_ORDER.index(f.lower().rsplit('.',1)[-1]) if f.lower().rsplit('.',1)[-1] in EXT_ORDER else 99):
+            if f.lower().rsplit('.',1)[-1] in EXT_ORDER:
                 imported.extend(_import_file(os.path.join(fp, f)))
         return imported
     return _import_file(fp)

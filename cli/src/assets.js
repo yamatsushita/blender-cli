@@ -504,8 +504,9 @@ async function resolveBlend(query, sceneContext, selectFn, log = () => {}) {
 
 /** Walk a directory tree and collect all 3D mesh files, sorted by format priority. */
 function collectMeshFiles(dir) {
-  const MODEL_EXTS = ['.obj', '.gltf', '.glb', '.blend', '.dae', '.stl', '.ply', '.fbx'];
-  const EXT_PRIORITY = { '.obj': 1, '.gltf': 2, '.glb': 2, '.dae': 3, '.stl': 4, '.ply': 5, '.fbx': 6, '.blend': 7 };
+  const MODEL_EXTS = ['.obj', '.gltf', '.glb', '.blend', '.stl', '.ply', '.fbx', '.dae'];
+  // Blender 4.x dropped built-in Collada; put .dae last so .stl/.obj/.gltf are preferred.
+  const EXT_PRIORITY = { '.obj': 1, '.gltf': 2, '.glb': 2, '.stl': 3, '.ply': 4, '.fbx': 5, '.blend': 6, '.dae': 7 };
   const results = [];
   function walk(d) {
     try {

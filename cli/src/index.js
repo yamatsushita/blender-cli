@@ -316,6 +316,12 @@ async function main() {
       .replace(/\['Emission'\](?=\s*\]\s*\.default_value\s*=\s*\()/g, "['Emission Color']")
       // ParticleSettings: Blender 4.x renamed attributes
       .replace(/\.child_nbr\b/g, '.child_count')
+      // Collada import: bpy.ops.wm.collada_import was removed in Blender 4.x
+      // Replace bare calls with a guarded version that skips on Blender 4.x
+      .replace(
+        /bpy\.ops\.wm\.collada_import\s*\(([^)]*)\)/g,
+        '(bpy.ops.wm.collada_import($1) if hasattr(bpy.ops.wm, "collada_import") else print("Collada importer not available in Blender 4.x — skipping"))'
+      )
       .replace(/\.child_radius\b/g, '.child_length');
 
     console.log(`\n${fmt(c.bold, '📝 Generated code:')}`);
