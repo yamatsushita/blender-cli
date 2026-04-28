@@ -504,9 +504,10 @@ async function resolveBlend(query, sceneContext, selectFn, log = () => {}) {
 
 /** Walk a directory tree and collect all 3D mesh files, sorted by format priority. */
 function collectMeshFiles(dir) {
-  const MODEL_EXTS = ['.obj', '.gltf', '.glb', '.blend', '.stl', '.ply', '.fbx', '.dae'];
-  // Blender 4.x dropped built-in Collada; put .dae last so .stl/.obj/.gltf are preferred.
-  const EXT_PRIORITY = { '.obj': 1, '.gltf': 2, '.glb': 2, '.stl': 3, '.ply': 4, '.fbx': 5, '.blend': 6, '.dae': 7 };
+  // .dae (Collada) excluded — bpy.ops.wm.collada_import was removed in Blender 4.x and
+  // hasattr() on bpy.ops returns True for any name regardless of availability.
+  const MODEL_EXTS = ['.obj', '.gltf', '.glb', '.stl', '.ply', '.fbx', '.blend'];
+  const EXT_PRIORITY = { '.obj': 1, '.gltf': 2, '.glb': 2, '.stl': 3, '.ply': 4, '.fbx': 5, '.blend': 6 };
   const results = [];
   function walk(d) {
     try {

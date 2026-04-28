@@ -189,18 +189,11 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
                   bpy.ops.import_scene.gltf(filepath=p)
               elif ext == 'stl':
                   return _import_stl(p)
-              elif ext == 'dae':
-                  # bpy.ops.wm.collada_import was removed in Blender 4.x — skip silently
-                  if hasattr(bpy.ops.wm, 'collada_import'):
-                      bpy.ops.wm.collada_import(filepath=p)
-                  else:
-                      print(f"Skipping {p}: Collada importer not available in this Blender version")
-                      return []
               else:  # .obj, .ply, .fbx, etc.
                   bpy.ops.wm.obj_import(filepath=p)
               return list(bpy.context.selected_objects)
-          # Extension priority: prefer formats that work reliably in Blender 4.x
-          EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
+          # Extension priority: .dae (Collada) is excluded — operator removed in Blender 4.x
+          EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend']
           if os.path.isdir(fp):
               imported = []
               # Walk recursively so subdirs (e.g. meshes/) are searched
@@ -303,7 +296,7 @@ Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'w
 def import_model(key):
     fp = ASSETS.get(key)
     if not fp: return []
-    EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
+    EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend']  # no .dae — Collada removed in Blender 4.x
     def _import_stl(p):
         if hasattr(bpy.ops.wm, 'stl_import'): bpy.ops.wm.stl_import(filepath=p)
         elif hasattr(bpy.ops.import_mesh, 'stl'): bpy.ops.import_mesh.stl(filepath=p)
@@ -317,9 +310,6 @@ def import_model(key):
             return [o for o in dt.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
         elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=p)
         elif ext == 'stl': return _import_stl(p)
-        elif ext == 'dae':
-            if hasattr(bpy.ops.wm, 'collada_import'): bpy.ops.wm.collada_import(filepath=p)
-            else: return []  # Collada removed in Blender 4.x
         else: bpy.ops.wm.obj_import(filepath=p)
         return list(bpy.context.selected_objects)
     if os.path.isdir(fp):

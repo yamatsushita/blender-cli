@@ -321,10 +321,11 @@ async function main() {
         /bpy\.ops\.import_mesh\.stl\s*\(([^)]*)\)/g,
         '(bpy.ops.wm.stl_import($1) if hasattr(bpy.ops.wm, "stl_import") else bpy.ops.import_mesh.stl($1))'
       )
-      // Collada import: bpy.ops.wm.collada_import was removed in Blender 4.x
+      // Collada: operator removed in Blender 4.x and hasattr() is unreliable on bpy.ops.
+      // Rewrite any generated call to a silent no-op print.
       .replace(
-        /bpy\.ops\.wm\.collada_import\s*\(([^)]*)\)/g,
-        '(bpy.ops.wm.collada_import($1) if hasattr(bpy.ops.wm, "collada_import") else print("Collada importer not available in Blender 4.x — skipping"))'
+        /bpy\.ops\.wm\.collada_import\s*\([^)]*\)/g,
+        'print("Collada (.dae) import skipped — not supported in Blender 4.x")'
       )
       .replace(/\.child_radius\b/g, '.child_length');
 
