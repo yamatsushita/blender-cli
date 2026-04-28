@@ -168,6 +168,16 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
           fp = ASSETS.get(key)
           if not fp:
               return []  # asset not available — caller should generate procedurally
+          def _import_stl(p):
+              # bpy.ops.import_mesh.stl was removed in Blender 4.x → use wm.stl_import
+              if hasattr(bpy.ops.wm, 'stl_import'):
+                  bpy.ops.wm.stl_import(filepath=p)
+              elif hasattr(bpy.ops.import_mesh, 'stl'):
+                  bpy.ops.import_mesh.stl(filepath=p)
+              else:
+                  print(f"No STL importer available, skipping {p}")
+                  return []
+              return list(bpy.context.selected_objects)
           def _import_file(p):
               ext = p.rsplit('.', 1)[-1].lower()
               bpy.ops.object.select_all(action='DESELECT')
@@ -178,7 +188,7 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
               elif ext in ('gltf', 'glb'):
                   bpy.ops.import_scene.gltf(filepath=p)
               elif ext == 'stl':
-                  bpy.ops.import_mesh.stl(filepath=p)
+                  return _import_stl(p)
               elif ext == 'dae':
                   # bpy.ops.wm.collada_import was removed in Blender 4.x — skip silently
                   if hasattr(bpy.ops.wm, 'collada_import'):
@@ -189,15 +199,22 @@ IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() f
               else:  # .obj, .ply, .fbx, etc.
                   bpy.ops.wm.obj_import(filepath=p)
               return list(bpy.context.selected_objects)
-          # Extension priority order for a directory: prefer formats that work in Blender 4.x
+          # Extension priority: prefer formats that work reliably in Blender 4.x
           EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
           if os.path.isdir(fp):
               imported = []
-              files = os.listdir(fp)
-              def ext_rank(f): ext = f.lower().rsplit('.',1)[-1]; return EXT_ORDER.index(ext) if ext in EXT_ORDER else 99
-              for f in sorted(files, key=ext_rank):
-                  if f.lower().rsplit('.',1)[-1] in EXT_ORDER:
-                      imported.extend(_import_file(os.path.join(fp, f)))
+              # Walk recursively so subdirs (e.g. meshes/) are searched
+              all_files = []
+              for root, dirs, files in os.walk(fp):
+                  for f in files:
+                      ext = f.lower().rsplit('.', 1)[-1] if '.' in f else ''
+                      if ext in EXT_ORDER:
+                          all_files.append(os.path.join(root, f))
+              def ext_rank(p):
+                  ext = p.lower().rsplit('.', 1)[-1]
+                  return EXT_ORDER.index(ext) if ext in EXT_ORDER else 99
+              for mf in sorted(all_files, key=ext_rank):
+                  imported.extend(_import_file(mf))
               return imported
           return _import_file(fp)
       objs = import_model('robot_model')   # returns [] if not downloaded
@@ -272,6 +289,14 @@ RULES:
    render.engine values: 'CYCLES', 'BLENDER_EEVEE', 'BLENDER_WORKBENCH'
      (use 'BLENDER_EEVEE' for all EEVEE — both Blender 3.x and 4.x accept it)
 
+   Import operators — Blender 4.x renamed several:
+     STL:     bpy.ops.wm.stl_import(filepath=p)      ← Blender 4.x
+              NOT bpy.ops.import_mesh.stl(...)        ← removed in 4.x
+     Collada: bpy.ops.wm.collada_import(filepath=p)  ← removed in 4.x; skip if not available
+     OBJ:     bpy.ops.wm.obj_import(filepath=p)      ← works in 3.3+ and 4.x
+     GLTF:    bpy.ops.import_scene.gltf(filepath=p)  ← works in all versions
+     ALWAYS use the import_model() helper above — it handles all version differences.
+
 Example -- "place a bunny with wood texture" (ASSETS = {'bunny_model': '...', 'wood_texture': '...'}):
 ## REASONING: Import the bunny (format unknown, use import_model helper).
 ## Apply wood texture via Principled BSDF ShaderNodeTexImage node.
@@ -279,6 +304,11 @@ def import_model(key):
     fp = ASSETS.get(key)
     if not fp: return []
     EXT_ORDER = ['obj', 'gltf', 'glb', 'stl', 'ply', 'fbx', 'blend', 'dae']
+    def _import_stl(p):
+        if hasattr(bpy.ops.wm, 'stl_import'): bpy.ops.wm.stl_import(filepath=p)
+        elif hasattr(bpy.ops.import_mesh, 'stl'): bpy.ops.import_mesh.stl(filepath=p)
+        else: return []
+        return list(bpy.context.selected_objects)
     def _import_file(p):
         ext = p.rsplit('.', 1)[-1].lower()
         bpy.ops.object.select_all(action='DESELECT')
@@ -286,7 +316,7 @@ def import_model(key):
             with bpy.data.libraries.load(p, link=False) as (df, dt): dt.objects = list(df.objects)
             return [o for o in dt.objects if o and (bpy.context.scene.collection.objects.link(o) or True)]
         elif ext in ('gltf', 'glb'): bpy.ops.import_scene.gltf(filepath=p)
-        elif ext == 'stl': bpy.ops.import_mesh.stl(filepath=p)
+        elif ext == 'stl': return _import_stl(p)
         elif ext == 'dae':
             if hasattr(bpy.ops.wm, 'collada_import'): bpy.ops.wm.collada_import(filepath=p)
             else: return []  # Collada removed in Blender 4.x
@@ -294,9 +324,13 @@ def import_model(key):
         return list(bpy.context.selected_objects)
     if os.path.isdir(fp):
         imported = []
-        for f in sorted(os.listdir(fp), key=lambda f: EXT_ORDER.index(f.lower().rsplit('.',1)[-1]) if f.lower().rsplit('.',1)[-1] in EXT_ORDER else 99):
-            if f.lower().rsplit('.',1)[-1] in EXT_ORDER:
-                imported.extend(_import_file(os.path.join(fp, f)))
+        all_files = []
+        for root, dirs, files in os.walk(fp):
+            for f in files:
+                ext = f.lower().rsplit('.', 1)[-1] if '.' in f else ''
+                if ext in EXT_ORDER: all_files.append(os.path.join(root, f))
+        for mf in sorted(all_files, key=lambda p: EXT_ORDER.index(p.lower().rsplit('.',1)[-1]) if p.lower().rsplit('.',1)[-1] in EXT_ORDER else 99):
+            imported.extend(_import_file(mf))
         return imported
     return _import_file(fp)
 objs = import_model('bunny_model')

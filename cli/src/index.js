@@ -316,8 +316,12 @@ async function main() {
       .replace(/\['Emission'\](?=\s*\]\s*\.default_value\s*=\s*\()/g, "['Emission Color']")
       // ParticleSettings: Blender 4.x renamed attributes
       .replace(/\.child_nbr\b/g, '.child_count')
+      // STL import: bpy.ops.import_mesh.stl was removed in Blender 4.x → wm.stl_import
+      .replace(
+        /bpy\.ops\.import_mesh\.stl\s*\(([^)]*)\)/g,
+        '(bpy.ops.wm.stl_import($1) if hasattr(bpy.ops.wm, "stl_import") else bpy.ops.import_mesh.stl($1))'
+      )
       // Collada import: bpy.ops.wm.collada_import was removed in Blender 4.x
-      // Replace bare calls with a guarded version that skips on Blender 4.x
       .replace(
         /bpy\.ops\.wm\.collada_import\s*\(([^)]*)\)/g,
         '(bpy.ops.wm.collada_import($1) if hasattr(bpy.ops.wm, "collada_import") else print("Collada importer not available in Blender 4.x — skipping"))'
