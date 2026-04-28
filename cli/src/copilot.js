@@ -153,6 +153,7 @@ ALWAYS-AVAILABLE VARIABLES (injected into every execution):
     Use ASSETS.get('key') to safely access. ASSETS may be empty if nothing was downloaded.
 - ASSET_PATH : str -- same as ASSET_DIR (backward-compat alias). Treat identically.
 - os, math, mathutils are pre-imported -- do NOT import them again.
+- Matrix, Vector, Euler, Quaternion, Color from mathutils are pre-imported directly -- use them without 'mathutils.' prefix (e.g., Matrix.Rotation(...), Vector((0,0,1))).
 
 IMPORTING ASSETS -- ONLY use keys shown in [PRE-DOWNLOADED ASSETS]. Use .get() for safety:
   WRONG:  bpy.ops.wm.obj_import(filepath=ASSET_DIR)   # ← ASSET_DIR is a folder!
