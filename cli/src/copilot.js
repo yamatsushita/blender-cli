@@ -739,23 +739,25 @@ async function getCopilotCode(userPrompt, history = []) {
  * can be displayed in real-time on the CLI.
  *
  * @param {string} userPrompt
- * @param {Array<{prompt: string, code: string}>} history
+ * @param {Array<{userText: string, assistantRaw: string}>} history
  * @param {{assetDict?: Record<string, string>}} [opts]
  * @param {{
  *   onThinkingStart?: () => void,
  *   onThinkingLine?: (line: string) => void,
  *   onThinkingEnd?: () => void,
  * }} [callbacks]
- * @returns {Promise<{thinking: string|null, code: string}>}
+ * @returns {Promise<{thinking: string|null, code: string, userText: string, fullRaw: string}>}
  */
 async function getCopilotResponseStream(userPrompt, history = [], opts = {}, callbacks = {}) {
   const token = getGitHubToken();
   const model = await discoverModel();
 
   const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
-  for (const { prompt, code } of history) {
-    messages.push({ role: 'user', content: prompt });
-    messages.push({ role: 'assistant', content: code });
+  // Replay conversation history — userText includes the assets block so the model
+  // remembers what was downloaded and what URLs the user mentioned.
+  for (const { userText, assistantRaw } of history) {
+    messages.push({ role: 'user', content: userText });
+    messages.push({ role: 'assistant', content: assistantRaw });
   }
 
   // Always inject the ASSETS ground truth so LLM never references unavailable keys.
@@ -766,10 +768,13 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
   const failedNote = (opts.failedAssets ?? []).length
     ? `\n[FAILED TO DOWNLOAD — do NOT reference these keys in ASSETS: ${opts.failedAssets.join(', ')}]`
     : '';
-  let userContent =
+  // userText is the plain-text version (no base64 images) — stored in history so the model
+  // remembers URLs, asset keys, and context across follow-up prompts.
+  const userText =
     `[PRE-DOWNLOADED ASSETS in ASSETS dict:\n${assetListing || '  (none)'}\n]${failedNote}\n` +
     userPrompt;
-  messages.push({ role: 'user', content: await buildUserContent(userContent) });
+  // For the actual API call, also embed any image URLs as base64 data URIs.
+  messages.push({ role: 'user', content: await buildUserContent(userText) });
 
   // --- Streaming state machine ---
   // The response format uses "## " prefix lines for reasoning, then raw Python code.
@@ -894,12 +899,13 @@ async function getCopilotResponseStream(userPrompt, history = [], opts = {}, cal
 
   // If no streaming reasoning was captured, fall back to parseResponse on full text
   if (!thinkingStarted) {
-    return parseResponse(fullRaw);
+    const parsed = parseResponse(fullRaw);
+    return { ...parsed, userText, fullRaw };
   }
 
   const thinking = thinkingLines.join('\n').trim() || null;
   const code = stripCodeFences(codeBuffer.trim());
-  return { thinking, code };
+  return { thinking, code, userText, fullRaw };
 }
 
 /** Reset cached model (useful for testing). */

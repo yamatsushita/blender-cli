@@ -190,7 +190,13 @@ async function main() {
     if (line === '/help')    { printHelp(); rl.resume(); rl.prompt(); return; }
     if (line === '/history') {
       if (!history.length) console.log(fmt(c.dim, '  (no history yet)'));
-      else history.forEach(({ prompt }, i) => console.log(`  ${fmt(c.dim, `${i + 1}.`)} ${prompt}`));
+      else history.forEach(({ userText, assistantRaw }, i) => {
+        // Show only the user's original prompt text (first non-blank line after the assets block)
+        const promptLine = userText
+          .split('\n')
+          .find((l) => l && !l.startsWith('[') && !l.startsWith("  '") && l !== ']') ?? userText.split('\n')[0];
+        console.log(`  ${fmt(c.dim, `${i + 1}.`)} ${promptLine}`);
+      });
       rl.resume(); rl.prompt(); return;
     }
     if (line === '/quit' || line === '/exit') { rl.close(); return; }
@@ -199,6 +205,8 @@ async function main() {
     let thinking = null;
     let assetDict = {}; // Fresh each prompt — no reuse from prior downloads
     let failedAssets = [];
+    let pendingUserText = null;
+    let pendingAssistantRaw = null;
 
     if (BUILTIN_COMMANDS[line]) {
       code = BUILTIN_COMMANDS[line];
@@ -262,6 +270,10 @@ async function main() {
           console.log(border);
         }
 
+        // Stash for history recording below
+        pendingUserText    = response.userText;
+        pendingAssistantRaw = response.fullRaw;
+
         // Warn about assets that could not be downloaded
         if (failedAssets.length > 0) {
           console.log(fmt(c.yellow, `  ⚠ Could not download: ${failedAssets.join(', ')} — LLM will generate procedurally`));
@@ -314,7 +326,7 @@ async function main() {
 
     if (args.dryRun) {
       console.log(fmt(c.yellow, '  [dry-run] Skipping Blender execution.\n'));
-      history.push({ prompt: line, code: patchedCode });
+      if (pendingUserText) history.push({ userText: pendingUserText, assistantRaw: pendingAssistantRaw ?? patchedCode });
       rl.resume(); rl.prompt(); return;
     }
 
@@ -343,7 +355,12 @@ async function main() {
       const result = await executeInBlender(execCode, blenderPaths);
       if (result.success) {
         spin2.stop(fmt(c.green, '✔ Scene updated'));
-        history.push({ prompt: line, code: patchedCode });
+        // Store full conversation context: user message (with assets block) +
+        // full model response (reasoning + code) so follow-up prompts have memory.
+        history.push({
+          userText:     pendingUserText ?? line,
+          assistantRaw: pendingAssistantRaw ?? patchedCode,
+        });
       } else {
         spin2.stop(fmt(c.red, `✖ Blender error: ${result.error ?? 'unknown'}`));
       }
